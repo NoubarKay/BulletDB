@@ -23,6 +23,7 @@ and keeps scan loops tight.
 - [Error handling](#error-handling)
 - [Project layout](#project-layout)
 - [Known limitations](#known-limitations)
+- [Known bugs](#known-bugs)
 - [Roadmap](#roadmap)
 
 ## Building
@@ -341,6 +342,31 @@ BulletDB/
   only if it ends up with too few values.
 - **Fixed output file.** The program always writes `test.bdb`.
 
+## Known bugs
+
+Things that are broken right now, most serious first.
+
+**Crashes or wrong data**
+- [ ] Tables loaded from `.bdb` crash in `print_table`: the reader never sets
+      `bitmap`, so it holds a garbage pointer
+- [ ] An empty value in the first data row fails the import: `detect_file_type("")`
+      returns `STR`, which is rejected
+- [ ] A first data row with fewer values than the header leaves the missing columns
+      unallocated, so the next row writes through a `NULL` pointer. The
+      "expected N values" error no longer fires
+- [ ] A trailing comma (`2025,50.00,true,`) sets that row's first value to NULL: the extra
+      empty token makes the outer `while` in `parse_row` run again
+- [ ] An empty `BOOL` value is stored as `false` and marked valid instead of NULL
+
+**Memory**
+- [ ] `extract_value` leaks two allocations per field (`destination` and the returned token
+      are never freed), and doesn't check `destination2` for `NULL`
+- [ ] `free_table` doesn't free `bitmap`, and `parse_header` doesn't set it to `NULL`
+- [ ] The `bitmap` `calloc` in `parse_row` isn't checked for `NULL`
+
+**Cosmetic**
+- [ ] `BOOL` values in `print_table` use `%hhd` with no width, so the column drifts out of line
+
 ## Roadmap
 
 - [x] CSV import with line-level error messages
@@ -365,6 +391,10 @@ BulletDB/
   - [ ] Detect integer overflow (`strtoll` setting `ERANGE`)
   - [ ] Reject lines longer than `BDB_CSV_MAX_LINE` instead of splitting them
   - [ ] Close the file when the line buffer can't be allocated
+- [ ] Store column types and NULL bitmaps in `.bdb` (writer and reader)
+- [ ] Pack NULL bitmaps into 1 bit per row instead of 1 byte, behind
+      `bdb_is_valid` / `bdb_set_valid` helpers
+- [ ] Split CSV fields in place instead of allocating a copy of each one
 - [ ] Column compression (run-length, delta, dictionary encoding)
 - [ ] Vectorized (SIMD) scans
 - [ ] Command-line subcommands such as `import`, `query` and `info`

@@ -30,3 +30,4 @@ BdbStatus bdb_error_set(BdbError *err, BdbStatus code, const char *fmt, ...) {
     }
     return code;
 }
+

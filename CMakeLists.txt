@@ -18,3 +18,4 @@ add_executable(BulletDB main.c
         src/engine/storage/bdb_reader.c
         src/engine/query/query.h
         src/engine/query/query.c)
+add_executable(test test.c)
