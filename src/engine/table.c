@@ -36,6 +36,10 @@ void print_table(TABLE *table) {
     for (uint64_t row = 0; row < table->row_count; row++) {
         for (uint64_t col = 0; col < table->col_count; col++) {
             const COLUMN *column = &table->columns[col];
+            if (column->bitmap[row] == 0) {
+                printf("%-12s", "NULL");
+                continue;
+            }
             switch (column->type) {
                 case BDB_COL_INT:
                     printf("%-12" PRId64, ((int64_t *)column->data)[row]);

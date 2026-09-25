@@ -59,6 +59,9 @@ static BdbStatus parse_header(TABLE *table, char *line, BdbError *err) {
 }
 
 void trim_string(const char *src, char *dst) {
+    if (src == NULL) {
+        return;
+    }
     while (isspace((unsigned char)*src)) src++;
     size_t len = strlen(src);
     while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
@@ -67,88 +70,158 @@ void trim_string(const char *src, char *dst) {
 }
 
 static enum ColumnType detect_file_type(const char *entry) {
+
     char str[256];
     trim_string(entry, str);
 
-    if (strcasecmp(str, "true") == 0 || strcasecmp(str, "false") == 0 ||
-    strcasecmp(str, "t") == 0    || strcasecmp(str, "f") == 0 ||
-    strcasecmp(str, "yes") == 0  || strcasecmp(str, "no") == 0) {
-        return BDB_COL_BOOL;
+    // 2. Guard against an empty string after trimming
+    if (str[0] == '\0') {
+        return BDB_COL_STR;
     }
 
+    // Boolean Check
+    if (strcasecmp(str, "true") == 0  || strcasecmp(str, "false") == 0 ||
+        strcasecmp(str, "t") == 0     || strcasecmp(str, "f") == 0     ||
+        strcasecmp(str, "yes") == 0   || strcasecmp(str, "no") == 0) {
+        return BDB_COL_BOOL;
+        }
+
     char *endptr;
-    strtol(entry, &endptr, 10);
-    while (isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr == '\0') {
+
+    // Integer Check (Passing 'str' instead of 'entry')
+    strtol(str, &endptr, 10);
+    // Ensure endptr actually moved (endptr != str) and reached the end of the string
+    if (endptr != str && *endptr == '\0') {
         return BDB_COL_INT;
     }
 
-    strtod(entry, &endptr);
-    while (isspace((unsigned char)*endptr)) endptr++;
-    if (*endptr == '\0') {
+    // Double Check (Passing 'str' instead of 'entry')
+    strtod(str, &endptr);
+    // Ensure endptr actually moved (endptr != str) and reached the end of the string
+    if (endptr != str && *endptr == '\0') {
         return BDB_COL_DOUBLE;
     }
 
     return BDB_COL_STR;
 }
 
-static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
-                           uint64_t line_no, BdbError *err) {
-    char *token = strtok(line, DELIMS);
-
-    for (uint64_t col = 0; col < table->col_count; col++) {
-        if (token == NULL) {
-            return bdb_error_set(err, BDB_ERR_PARSE,
-                                 "line %llu: expected %llu values, got %llu",
-                                 line_no,
-                                 table->col_count,
-                                 col);
-        }
-
-        char *end;
-
-        if (strlen(token) > BDB_CSV_MAX_FIELD) {
-            return bdb_error_set(err, BDB_ERR_PARSE,
-                                 "line %llu: value in column '%s' is longer than %d characters",
-                                 line_no, table->columns[col].name, BDB_CSV_MAX_FIELD);
-        }
-
-        if (row == 0) {
-
-            table->columns[col].type = detect_file_type(token);
-            table->columns[col].data = calloc(table->row_count,
-                                              bdb_col_type_size(table->columns[col].type));
-            if (table->columns[col].data == NULL) {
-                return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column '%s' data",
-                                     table->columns[col].name);
-            }
-        }
-
-        switch (table->columns[col].type) {
-            case BDB_COL_INT:    ((int64_t *)table->columns[col].data)[row] = (int64_t)strtoll(token, &end, 10); break;
-            case BDB_COL_DOUBLE: ((double  *)table->columns[col].data)[row] = (double)strtod(token, &end); break;
-            case BDB_COL_BOOL: {
-                // Safely handles text ("true"/"false", "T"/"F", "yes"/"no") or digits ("1"/"0")
-                bool bool_val = false;
-                if (strcasecmp(token, "true") == 0 || strcasecmp(token, "t") == 0 ||
-                    strcasecmp(token, "yes") == 0  || strcmp(token, "1") == 0) {
-                    bool_val = true;
-                    } else {
-                        bool_val = false;
-                    }
-                ((bool *)table->columns[col].data)[row] = bool_val;
-                break;
-            }        }
-
-
-        token = strtok(NULL, DELIMS);
+static char* extract_value(char **line) {
+    // If the input string is empty or we reached the end, return NULL
+    if (*line == NULL || **line == '\0') {
+        return NULL;
     }
 
-    if (token != NULL) {
-        return bdb_error_set(err, BDB_ERR_PARSE,
-                             "line %llu: more values than the %llu columns in the header",
-                             line_no,
-                             table->col_count);
+    const char *current_start = *line;
+    const char *next_comma = strchr(current_start, ',');
+    int length;
+
+    if (next_comma != NULL) {
+        length = next_comma - current_start;
+        // Advance the original pointer past the comma for the next call
+        *line = (char *)(next_comma + 1);
+    } else {
+        length = strlen(current_start);
+        // No more commas, advance original pointer to the very end
+        *line = NULL;
+    }
+
+    // Allocate memory on the HEAP so it persists after returning
+    char *destination = malloc(length + 1);
+    char *destination2 = malloc(length + 1);
+    if (destination == NULL) return NULL; // Always check if malloc succeeded
+
+    strncpy(destination, current_start, length);
+    destination[length] = '\0';
+    trim_string(destination, destination2);
+    return destination2;
+}
+
+static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
+                           uint64_t line_no, BdbError *err) {
+    char *token;
+    char *moving_line = line;
+    token = extract_value(&moving_line);
+
+    while (token != NULL) {
+        for (uint64_t col = 0; col < table->col_count; col++) {
+
+            char *end;
+
+            if (token == NULL) {
+                continue;
+            }
+
+            if (token != NULL && strlen(token) > BDB_CSV_MAX_FIELD) {
+                return bdb_error_set(err, BDB_ERR_PARSE,
+                                     "line %llu: value in column '%s' is longer than %d characters",
+                                     line_no, table->columns[col].name, BDB_CSV_MAX_FIELD);
+            }
+
+            if (row == 0) {
+
+                table->columns[col].type = detect_file_type(token);
+                table->columns[col].data = calloc(table->row_count,
+                                                  bdb_col_type_size(table->columns[col].type));
+                table->columns[col].bitmap = calloc(table->row_count,sizeof(char));
+
+                if (table->columns[col].data == NULL) {
+                    return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column '%s' data",
+                                         table->columns[col].name);
+                }
+            }
+
+            switch (table->columns[col].type) {
+                case BDB_COL_INT:
+                    ((int64_t *)table->columns[col].data)[row] = (int64_t)strtoll(strcmp(token, "") != 0 ? token : "0", &end, 10);
+                    if (strcmp(token, "") != 0) {
+                        table->columns[col].bitmap[row] = 1;
+                    }else {
+                        table->columns[col].bitmap[row] = 0;
+                    }
+                    break;
+                case BDB_COL_DOUBLE:
+                    ((double  *)table->columns[col].data)[row] = (double)strtod(strcmp(token, "") != 0 ? token : "0", &end);
+                    if (strcmp(token, "") != 0) {
+                        table->columns[col].bitmap[row] = 1;
+                    }else {
+                        table->columns[col].bitmap[row] = 0;
+                    }
+                    break;
+                case BDB_COL_BOOL: {
+                    // Safely handles text ("true"/"false", "T"/"F", "yes"/"no") or digits ("1"/"0")
+                    bool bool_val = false;
+                    if (strcasecmp(token, "true") == 0 || strcasecmp(token, "t") == 0 ||
+                        strcasecmp(token, "yes") == 0  || strcmp(token, "1") == 0) {
+                        bool_val = true;
+                        } else {
+                            bool_val = false;
+                        }
+                    ((bool *)table->columns[col].data)[row] = bool_val;
+                    if (token != NULL) {
+                        table->columns[col].bitmap[row] = 1;
+                    }else {
+                        table->columns[col].bitmap[row] = 0;
+                    }
+                    break;
+                }
+                default:
+                    return bdb_error_set(err, BDB_ERR_PARSE,
+                                         "line %llu: unsupported column type %d",
+                                         line_no,
+                                         table->columns[col].type);
+            }
+
+
+            token = extract_value(&moving_line);
+        }
+
+        if (token != NULL && strcmp(token, "") != 0 ) {
+            return bdb_error_set(err, BDB_ERR_PARSE,
+                                 "line %llu: more values than the %llu columns in the header",
+                                 line_no,
+                                 table->col_count);
+        }
+
     }
     return BDB_OK;
 }

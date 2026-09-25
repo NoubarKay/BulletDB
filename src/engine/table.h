@@ -21,6 +21,7 @@ typedef struct {
     char* name;
     enum ColumnType type;
     void* data;
+    char* bitmap;
 } COLUMN;
 
 typedef struct {
