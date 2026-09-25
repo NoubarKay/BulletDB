@@ -5,6 +5,9 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include "common.h"
 
 void print_table(TABLE *table) {
     for (uint64_t col = 0; col < table->col_count; col++) {
@@ -39,4 +42,15 @@ void free_table(TABLE *table)
     table->columns = NULL;
     table->col_count = 0;
     table->row_count = 0;
+}
+
+BdbStatus bdb_find_column(const TABLE *table, const char *name, size_t *col_idx, BdbError *err) {
+    for (size_t col = 0; col < table->col_count; col++) {
+        if (strcmp(table->columns[col].name, name) == 0) {
+            *col_idx = col;
+            return BDB_OK;
+        }
+    }
+
+    return bdb_error_set(err, BDB_ERR_NOT_FOUND, "%s", "The column was not found");
 }

@@ -11,6 +11,7 @@
 #include "src/engine/table.h"
 #include "src/csv.h"
 #include "src/engine/common.h"
+#include "src/engine/query/query.h"
 #include "src/engine/storage/bdb.h"
 
 
@@ -60,6 +61,7 @@ int main(int argc, char *argv[]) {
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n", err.message);
         free_table(&table);
+        free_table(&loaded);
         return 1;
     }
 
@@ -71,6 +73,31 @@ int main(int argc, char *argv[]) {
     printf("Round trip: %s\n", matches ? "OK" : "MISMATCH");
 
     print_table(&loaded);
+
+    size_t col_idx = 0;
+    int64_t result = 0;
+
+    BdbQuery query = {
+        BDB_AGG_SUM,
+        "price",
+        true,
+        {
+            "year",
+            BDB_OP_NE,
+            2025
+        }
+    };
+
+    status = bdb_run_query(&loaded, &query, &result, &err);
+
+    if (status != BDB_OK) {
+        fprintf(stderr, "error: %s\n", err.message);
+        free_table(&table);
+        free_table(&loaded);
+        return 1;
+    }
+
+    printf("Sum of prices: %" PRId64 "\n", result);
 
 
     free_table(&table);
