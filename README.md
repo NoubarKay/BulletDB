@@ -354,6 +354,17 @@ BulletDB/
 - [ ] Per-row-group min/max statistics, used to skip groups during queries
 - [ ] Configurable row group size (for example, thousands of rows per group)
 - [ ] More column types (`double`, strings via a dictionary)
+- [ ] CSV type inference across the whole column (widen `BOOL` → `INT` → `DOUBLE` → `STR`
+      during the row-count pass), with an optional user-supplied schema
+- [ ] CSV import hardening:
+  - [ ] Validate every value against its column type, not just the first row (`abc` in an
+        `INT` column is currently stored as `0`)
+  - [ ] Trim each field once and use the trimmed value for both type detection and parsing
+  - [ ] Reject invalid `BOOL` values instead of storing them as `false`
+  - [ ] Report an error for `STR` columns until string storage exists
+  - [ ] Detect integer overflow (`strtoll` setting `ERANGE`)
+  - [ ] Reject lines longer than `BDB_CSV_MAX_LINE` instead of splitting them
+  - [ ] Close the file when the line buffer can't be allocated
 - [ ] Column compression (run-length, delta, dictionary encoding)
 - [ ] Vectorized (SIMD) scans
 - [ ] Command-line subcommands such as `import`, `query` and `info`

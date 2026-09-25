@@ -14,7 +14,8 @@ typedef enum {
     BDB_ERR_PARSE,     // bad value in the CSV (e.g. "abc" in a number column)
     BDB_ERR_IO,        // fread/fwrite read or wrote fewer items than asked
     BDB_ERR_FORMAT,    // file isn't a valid .bdb, or is corrupted
-    BDB_ERR_NOT_FOUND  // e.g. a column name that doesn't exist
+    BDB_ERR_NOT_FOUND,  // e.g. a column name that doesn't exist
+    BDB_ERR_INVALID
 } BdbStatus;
 
 typedef struct {
