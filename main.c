@@ -44,65 +44,67 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    print_table(&table);
 
-    status = bdb_write("test.bdb", &table, &err);
-    if (status != BDB_OK) {
-        fprintf(stderr, "error: %s\n", err.message);
-        free_table(&table);
-        return 1;
-    }
-    printf("\nWrote test.bdb\n");
 
-    // Read into a separate table so the CSV table isn't overwritten.
-    // bdb_read only loads the counts for now (no columns), so compare those
-    // instead of calling print_table/free_table on it.
-    TABLE loaded = {0};
-    status = bdb_read("test.bdb", &loaded, &err);
-    if (status != BDB_OK) {
-        fprintf(stderr, "error: %s\n", err.message);
-        free_table(&table);
-        free_table(&loaded);
-        return 1;
-    }
+    // status = bdb_write("test.bdb", &table, &err);
+    // if (status != BDB_OK) {
+    //     fprintf(stderr, "error: %s\n", err.message);
+    //     free_table(&table);
+    //     return 1;
+    // }
+    // printf("\nWrote test.bdb\n");
 
-    printf("Read test.bdb: %" PRIu64 " rows, %" PRIu64 " columns\n",
-           loaded.row_count, loaded.col_count);
-
-    int matches = loaded.row_count == table.row_count &&
-                  loaded.col_count == table.col_count;
-    printf("Round trip: %s\n", matches ? "OK" : "MISMATCH");
-
-    print_table(&loaded);
-
-    size_t col_idx = 0;
-    int64_t result = 0;
-
-    BdbQuery query = {
-        BDB_AGG_SUM,
-        "price",
-        true,
-        {
-            "year",
-            BDB_OP_NE,
-            2025
-        }
-    };
-
-    status = bdb_run_query(&loaded, &query, &result, &err);
-
-    if (status != BDB_OK) {
-        fprintf(stderr, "error: %s\n", err.message);
-        free_table(&table);
-        free_table(&loaded);
-        return 1;
-    }
-
-    printf("Sum of prices: %" PRId64 "\n", result);
-
+    // // Read into a separate table so the CSV table isn't overwritten.
+    // // bdb_read only loads the counts for now (no columns), so compare those
+    // // instead of calling print_table/free_table on it.
+    // TABLE loaded = {0};
+    // status = bdb_read("test.bdb", &loaded, &err);
+    // if (status != BDB_OK) {
+    //     fprintf(stderr, "error: %s\n", err.message);
+    //     free_table(&table);
+    //     free_table(&loaded);
+    //     return 1;
+    // }
+    //
+    // printf("Read test.bdb: %" PRIu64 " rows, %" PRIu64 " columns\n",
+    //        loaded.row_count, loaded.col_count);
+    //
+    // int matches = loaded.row_count == table.row_count &&
+    //               loaded.col_count == table.col_count;
+    // printf("Round trip: %s\n", matches ? "OK" : "MISMATCH");
+    //
+    // print_table(&loaded);
+    //
+    // size_t col_idx = 0;
+    // int64_t result = 0;
+    //
+    // BdbQuery query = {
+    //     BDB_AGG_COUNT,
+    //     "price",
+    //     true,
+    //     {
+    //         "year",
+    //         BDB_OP_GE,
+    //         2024
+    //     }
+    // };
+    //
+    // status = bdb_run_query(&loaded, &query, &result, &err);
+    //
+    // if (status != BDB_OK) {
+    //     fprintf(stderr, "error: %s\n", err.message);
+    //     free_table(&table);
+    //     free_table(&loaded);
+    //     return 1;
+    // }
+    //
+    // printf("Sum of prices: %" PRId64 "\n", result);
+    //
 
     free_table(&table);
-    free_table(&loaded);
-    return matches ? 0 : 1;
+    //free_table(&loaded);
+    return 0;
 }
 
 

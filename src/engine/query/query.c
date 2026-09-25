@@ -38,11 +38,14 @@ static bool bdb_query_compare(const enum BdbOperator op, int64_t value_1, int64_
 BdbStatus bdb_run_query(const TABLE* table, const BdbQuery* query, int64_t* result, BdbError *err) {
     size_t col_idx = 0;
     size_t filter_col_idx = 0;
-    int64_t sum = 0;
+    int64_t total = 0;
 
     BdbStatus status = BDB_OK;
 
-    status = bdb_find_column(table, query->field, &col_idx, err);
+    if (query->agg != BDB_AGG_COUNT)
+    {
+        status = bdb_find_column(table, query->field, &col_idx, err);
+    }
 
     if (status != BDB_OK) {
         return status;
@@ -56,18 +59,29 @@ BdbStatus bdb_run_query(const TABLE* table, const BdbQuery* query, int64_t* resu
         return status;
     }
 
-    for (size_t i = 0; i < table->row_count; i++) {
-        if (query->has_filter) {
-            int64_t value = table->columns[filter_col_idx].data[i];
+    // for (size_t i = 0; i < table->row_count; i++) {
+    //     if (query->has_filter) {
+    //         int64_t value = table->columns[filter_col_idx].data[i];
+    //
+    //         if (!bdb_query_compare(query->filter.op, value, query->filter.value)) {
+    //             continue;
+    //         }
+    //     }
+    //
+    //     switch (query->agg) {
+    //         case BDB_AGG_SUM:
+    //             total+= table->columns[col_idx].data[i];
+    //             break;
+    //         case BDB_AGG_COUNT:
+    //             total += 1;
+    //             break;
+    //         default:
+    //             return bdb_error_set(err, BDB_ERR_INVALID,
+    //                                  "unknown aggregate %d", (int)query->agg);
+    //     }
+    // }
 
-            if (!bdb_query_compare(query->filter.op, value, query->filter.value)) {
-                continue;
-            }
-        }
-        sum+= table->columns[col_idx].data[i];
-    }
-
-    *result = sum;
+    *result = total;
 
     return BDB_OK;
 }

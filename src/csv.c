@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,13 +8,14 @@
 #include "engine/common.h"
 
 #define DELIMS ",\r\n"
+#define BDB_CSV_MAX_LINE (1024 * 1024)
+#define BDB_CSV_MAX_FIELD 255
 
-static uint64_t get_total_rows(FILE *file) {
+static uint64_t get_total_rows(FILE *file, char *buffer) {
     uint64_t num_of_rows = 0;
     bool is_first_line = true;
-    char buffer[256];
 
-    while (fgets(buffer, sizeof buffer, file) != NULL) {
+    while (fgets(buffer, BDB_CSV_MAX_LINE, file) != NULL) {
         if (is_first_line) {
             is_first_line = false;
             continue;
@@ -47,14 +49,6 @@ static BdbStatus parse_header(TABLE *table, char *line, BdbError *err) {
             return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column name '%s'", token);
         }
 
-        if (table->row_count > 0) {
-            column->data = calloc(table->row_count, sizeof(int64_t));
-            if (column->data == NULL) {
-                return bdb_error_set(err, BDB_ERR_NOMEM,
-                                     "out of memory for column '%s' data", column->name);
-            }
-        }
-
         token = strtok(NULL, DELIMS);
     }
 
@@ -62,6 +56,40 @@ static BdbStatus parse_header(TABLE *table, char *line, BdbError *err) {
         return bdb_error_set(err, BDB_ERR_PARSE, "line 1: header has no columns");
     }
     return BDB_OK;
+}
+
+void trim_string(const char *src, char *dst) {
+    while (isspace((unsigned char)*src)) src++;
+    size_t len = strlen(src);
+    while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
+    strncpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static enum ColumnType detect_file_type(const char *entry) {
+    char str[256];
+    trim_string(entry, str);
+
+    if (strcasecmp(str, "true") == 0 || strcasecmp(str, "false") == 0 ||
+    strcasecmp(str, "t") == 0    || strcasecmp(str, "f") == 0 ||
+    strcasecmp(str, "yes") == 0  || strcasecmp(str, "no") == 0) {
+        return BDB_COL_BOOL;
+    }
+
+    char *endptr;
+    strtol(entry, &endptr, 10);
+    while (isspace((unsigned char)*endptr)) endptr++;
+    if (*endptr == '\0') {
+        return BDB_COL_INT;
+    }
+
+    strtod(entry, &endptr);
+    while (isspace((unsigned char)*endptr)) endptr++;
+    if (*endptr == '\0') {
+        return BDB_COL_DOUBLE;
+    }
+
+    return BDB_COL_STR;
 }
 
 static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
@@ -72,39 +100,64 @@ static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
         if (token == NULL) {
             return bdb_error_set(err, BDB_ERR_PARSE,
                                  "line %llu: expected %llu values, got %llu",
-                                 (unsigned long long)line_no,
-                                 (unsigned long long)table->col_count,
-                                 (unsigned long long)col);
+                                 line_no,
+                                 table->col_count,
+                                 col);
         }
 
         char *end;
-        long long value = strtoll(token, &end, 10);
-        if (end == token || *end != '\0') {
+
+        if (strlen(token) > BDB_CSV_MAX_FIELD) {
             return bdb_error_set(err, BDB_ERR_PARSE,
-                                 "line %llu: bad value '%s' in column '%s'",
-                                 (unsigned long long)line_no, token,
-                                 table->columns[col].name);
+                                 "line %llu: value in column '%s' is longer than %d characters",
+                                 line_no, table->columns[col].name, BDB_CSV_MAX_FIELD);
         }
 
-        table->columns[col].data[row] = value;
+        if (row == 0) {
+
+            table->columns[col].type = detect_file_type(token);
+            table->columns[col].data = calloc(table->row_count,
+                                              bdb_col_type_size(table->columns[col].type));
+            if (table->columns[col].data == NULL) {
+                return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column '%s' data",
+                                     table->columns[col].name);
+            }
+        }
+
+        switch (table->columns[col].type) {
+            case BDB_COL_INT:    ((int64_t *)table->columns[col].data)[row] = (int64_t)strtoll(token, &end, 10); break;
+            case BDB_COL_DOUBLE: ((double  *)table->columns[col].data)[row] = (double)strtod(token, &end); break;
+            case BDB_COL_BOOL: {
+                // Safely handles text ("true"/"false", "T"/"F", "yes"/"no") or digits ("1"/"0")
+                bool bool_val = false;
+                if (strcasecmp(token, "true") == 0 || strcasecmp(token, "t") == 0 ||
+                    strcasecmp(token, "yes") == 0  || strcmp(token, "1") == 0) {
+                    bool_val = true;
+                    } else {
+                        bool_val = false;
+                    }
+                ((bool *)table->columns[col].data)[row] = bool_val;
+                break;
+            }        }
+
+
         token = strtok(NULL, DELIMS);
     }
 
     if (token != NULL) {
         return bdb_error_set(err, BDB_ERR_PARSE,
                              "line %llu: more values than the %llu columns in the header",
-                             (unsigned long long)line_no,
-                             (unsigned long long)table->col_count);
+                             line_no,
+                             table->col_count);
     }
     return BDB_OK;
 }
 
-static BdbStatus read_table(TABLE *table, FILE *file, BdbError *err) {
-    char buffer[256];
+static BdbStatus read_table(TABLE *table, FILE *file, BdbError *err, char * buffer) {
     uint64_t line_no = 0;
     uint64_t row = 0;
 
-    while (fgets(buffer, sizeof buffer, file) != NULL) {
+    while (fgets(buffer, BDB_CSV_MAX_LINE, file) != NULL) {
         line_no++;
 
         if (line_no == 1) {
@@ -139,11 +192,16 @@ BdbStatus read_csv(const char *path, TABLE *table, BdbError *err) {
     if (file == NULL) {
         return bdb_error_set(err, BDB_ERR_OPEN, "could not open '%s'", path);
     }
-
-    table->row_count = get_total_rows(file);
+    char *buffer = malloc(BDB_CSV_MAX_LINE);
+    if (buffer == NULL) {
+        free(buffer);
+        return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for line buffer");
+    }
+    table->row_count = get_total_rows(file, buffer);
     rewind(file);
 
-    BdbStatus status = read_table(table, file, err);
+    BdbStatus status = read_table(table, file, err, buffer);
     fclose(file);  // closed on both paths
+    free(buffer);
     return status;
 }

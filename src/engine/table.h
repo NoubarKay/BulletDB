@@ -4,13 +4,23 @@
 
 #ifndef BULLETDB_TABLE_H
 #define BULLETDB_TABLE_H
+#include <stddef.h>
 #include <stdint.h>
 
 #include "common.h"
 
+// Stored in .bdb files as one byte, so these values must not change.
+enum ColumnType {
+    BDB_COL_INT = 0,   // int64_t
+    BDB_COL_DOUBLE = 1,  // double
+    BDB_COL_BOOL = 3,
+    BDB_COL_STR = 4
+};
+
 typedef struct {
     char* name;
-    int64_t* data;
+    enum ColumnType type;
+    void* data;
 } COLUMN;
 
 typedef struct {
@@ -19,6 +29,9 @@ typedef struct {
     uint32_t group_size;
     COLUMN* columns;
 } TABLE;
+
+// Size in bytes of one value of the given type, or 0 if the type is unknown.
+size_t bdb_col_type_size(enum ColumnType type);
 
 void print_table(TABLE *table);
 void free_table(TABLE *table);
