@@ -1,0 +1,16 @@
+//
+// Created by user on 9/25/2026.
+//
+
+#ifndef BULLETDB_FORMAT_H
+#define BULLETDB_FORMAT_H
+
+#define BDB_MAX_COL_COUNT 100
+
+
+#define BDB_MIN_ACCEPTED_COL_COUNT 1
+
+#define BDB_GROUP_SIZE 2
+#define BDB_MAX_GROUP_SIZE 100
+
+#endif //BULLETDB_FORMAT_H
