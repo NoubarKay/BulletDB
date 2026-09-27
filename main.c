@@ -13,7 +13,28 @@
 #include "src/engine/common.h"
 #include "src/engine/query/query.h"
 #include "src/engine/storage/bdb.h"
+#include "src/engine/sink/bdb_sink.h"
 
+// BdbChunkFn that prints each chunk. ctx is an optional uint64_t counter
+// used to number the chunks; pass NULL to skip numbering.
+static BdbStatus print_chunk_cb(const CHUNK *chunk, void *ctx, BdbError *err) {
+    (void)err;
+
+    if (ctx != NULL) {
+        uint64_t *chunk_no = ctx;
+        printf("\nchunk %" PRIu64 " (%" PRIu64 " rows)\n", *chunk_no, chunk->count);
+        (*chunk_no)++;
+    }
+
+    // A chunk has the same shape as a table, so borrow print_table.
+    TABLE view = {
+        .row_count = chunk->count,
+        .col_count = chunk->col_count,
+        .columns = chunk->columns
+    };
+    print_table(&view);
+    return BDB_OK;
+}
 
 int main(int argc, char *argv[]) {
     BdbError err = {0};
@@ -30,7 +51,7 @@ int main(int argc, char *argv[]) {
         .columns = NULL
     };
 
-    BdbStatus status = read_csv(argv[1], &table, &err);
+    BdbStatus status = read_csv(argv[1], print_chunk_cb, &err);
 
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n",

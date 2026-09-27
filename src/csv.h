@@ -5,8 +5,8 @@
 #ifndef BULLETDB_CSV_H
 #define BULLETDB_CSV_H
 #include "engine/common.h"
-#include "engine/table.h"
+#include "engine/sink/bdb_sink.h"
 
-BdbStatus read_csv(const char *path, TABLE *table, BdbError *err);
+BdbStatus read_csv(const char *path, BdbChunkFn on_chunk, BdbError *err);
 
 #endif //BULLETDB_CSV_H

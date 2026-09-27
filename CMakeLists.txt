@@ -19,5 +19,8 @@ add_executable(BulletDB main.c
         src/engine/query/query.h
         src/engine/query/query.c
         src/engine/csv/csv_tokenize.h
-        src/engine/csv/csv_tokenize.c)
+        src/engine/csv/csv_tokenize.c
+        src/engine/chunk.h
+        src/engine/sink/bdb_sink.h
+        src/chunk.c)
 add_executable(test test.c)
