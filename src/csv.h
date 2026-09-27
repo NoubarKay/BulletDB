@@ -4,9 +4,21 @@
 
 #ifndef BULLETDB_CSV_H
 #define BULLETDB_CSV_H
+#include <stdio.h>
+
 #include "engine/common.h"
 #include "engine/sink/bdb_sink.h"
 
-BdbStatus read_csv(const char *path, BdbChunkFn on_chunk, BdbError *err);
+typedef struct {
+    FILE *file;
+    char *buffer;
+    uint64_t line_no;
+    bool have_types;
+    CHUNK chunk;
+} CSV_READER;
+
+BdbStatus csv_open(CSV_READER *reader, const char *path, BdbError *err);
+BdbStatus csv_next_chunk(CSV_READER *r, const CHUNK **out, BdbError *err);
+void csv_close(CSV_READER *reader);
 
 #endif //BULLETDB_CSV_H

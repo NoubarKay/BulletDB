@@ -1,7 +1,7 @@
 //
 // Created by user on 9/24/2026.
 //
-
+#define _CRTDBG_MAP_ALLOC
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,34 +38,27 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, void *ctx, BdbError *err) {
 
 int main(int argc, char *argv[]) {
     BdbError err = {0};
-
+    CSV_READER reader = {0};
+    const CHUNK *chunk;
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <file.csv>\n", argv[0]);
         return 1;
     }
 
-    TABLE table = {
-        .col_count = 0,
-        .row_count = 0,
-        .group_size = 2,
-        .columns = NULL
-    };
-
-    BdbStatus status = read_csv(argv[1], print_chunk_cb, &err);
+    BdbStatus status = csv_open(&reader, argv[1], &err);
 
     if (status != BDB_OK) {
-        fprintf(stderr, "error: %s\n",
-                err.message[0] != '\0' ? err.message : bdb_status_str(status));
-        free_table(&table);
+        fprintf(stderr, "error: %s\n", err.message);
         return 1;
     }
 
-    if (table.col_count == 0) {
-        fprintf(stderr, "No columns read from %s\n", argv[1]);
-        return 1;
+    while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
+        print_chunk_cb(chunk, NULL, &err);
     }
+    if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
-    print_table(&table);
+    csv_close(&reader);
+    return status == BDB_OK ? 0 : 1;
 
 
     // status = bdb_write("test.bdb", &table, &err);
@@ -123,7 +116,6 @@ int main(int argc, char *argv[]) {
     // printf("Sum of prices: %" PRId64 "\n", result);
     //
 
-    free_table(&table);
     //free_table(&loaded);
     return 0;
 }

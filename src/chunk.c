@@ -16,5 +16,13 @@ void chunk_reset(CHUNK *c) {
 }
 
 void chunk_free(CHUNK *c) {
+    for (uint64_t i = 0; i < c->col_count; i++) {
+        free(c->columns[i].name);
+        free(c->columns[i].data);
+        free(c->columns[i].bitmap);
+    }
     free(c->columns);
+    c->columns = NULL;   // so a second chunk_free does nothing
+    c->col_count = 0;
+    c->count = 0;
 }

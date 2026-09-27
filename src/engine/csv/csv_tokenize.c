@@ -18,7 +18,9 @@ static void trim_string(const char *src, char *dst) {
     size_t len = strlen(src);
     while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
     strncpy(dst, src, len);
-    dst[len] = '\0';
+    if (dst != NULL) {
+        dst[len] = '\0';
+    }
 }
 static void trim_trailing(char *src) {
     size_t length = strlen(src);
@@ -54,6 +56,7 @@ char* extract_value(char **line) {
     strncpy(destination, current_start, length);
     destination[length] = '\0';
     trim_string(destination, destination2);
+    free(destination);
     return destination2;
 }
 
@@ -73,7 +76,7 @@ BdbStatus read_next_line(FILE *file, char *buffer, BdbError *err, uint64_t *line
 
     (*line_no)++;
 
-    if (!feof(file) && buffer_result[strlen(buffer) -1] != '\n') {
+    if (!feof(file) && buffer_result && buffer_result[strlen(buffer) -1] != '\n') {
         return bdb_error_set(err, BDB_ERR_PARSE,
                                  "line %" PRIu64 " exceeds the maximum length of %d bytes", *line_no, BDB_CSV_MAX_LINE);
     }

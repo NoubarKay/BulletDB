@@ -46,6 +46,7 @@ static bool is_numeric(enum ColumnType type) {
 }
 
 // Formats one cell into out. A NULL bitmap means every row is valid.
+// ReSharper disable once CppDFAConstantParameter
 static void format_cell(const COLUMN *column, uint64_t row, char *out, size_t n) {
     if (column->bitmap != NULL && column->bitmap[row] == 0) {
         snprintf(out, n, "NULL");

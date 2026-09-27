@@ -1,5 +1,5 @@
-#include <ctype.h>
-#include <stdbool.h>
+#include "csv.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +24,7 @@ static BdbStatus parse_header(CHUNK* chunk, char *line, BdbError *err) {
         COLUMN *column = &chunk->columns[chunk->col_count];
         column->name = NULL;
         column->data = NULL;
+        column->bitmap = NULL;
         chunk->col_count++;
 
         column->name = strdup(token);
@@ -84,7 +85,7 @@ static BdbStatus detect_types_allo_chunk_buffers(CHUNK* chunk, char *line, uint6
                 continue;
             }
 
-            if (token != NULL && strlen(token) > BDB_CSV_MAX_FIELD) {
+            if (strlen(token) > BDB_CSV_MAX_FIELD) {
                 return bdb_error_set(err, BDB_ERR_PARSE,
                                      "line %llu: value in column '%s' is longer than %d characters",
                                      line_no, chunk->columns[col].name, BDB_CSV_MAX_FIELD);
@@ -120,7 +121,7 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
                 continue;
             }
 
-            if (token != NULL && strlen(token) > BDB_CSV_MAX_FIELD) {
+            if (strlen(token) > BDB_CSV_MAX_FIELD) {
                 return bdb_error_set(err, BDB_ERR_PARSE,
                                      "line %llu: value in column '%s' is longer than %d characters",
                                      line_no, chunk->columns[col].name, BDB_CSV_MAX_FIELD);
@@ -128,16 +129,16 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
 
             switch (chunk->columns[col].type) {
                 case BDB_COL_INT:
-                    ((int64_t *)chunk->columns[col].data)[row] = (int64_t)strtoll(strcmp(token, "") != 0 ? token : "0", &end, 10);
-                    if (strcmp(token, "") != 0) {
+                    ((int64_t *)chunk->columns[col].data)[row] = (int64_t)strtoll( token[0] == '\0' ? token : "0", &end, 10);
+                    if ( token[0] == '\0') {
                         chunk->columns[col].bitmap[row] = 1;
                     }else {
                         chunk->columns[col].bitmap[row] = 0;
                     }
                     break;
                 case BDB_COL_DOUBLE:
-                    ((double  *)chunk->columns[col].data)[row] = (double)strtod(strcmp(token, "") != 0 ? token : "0", &end);
-                    if (strcmp(token, "") != 0) {
+                    ((double  *)chunk->columns[col].data)[row] = (double)strtod( token[0] == '\0' ? token : "0", &end);
+                    if ( token[0] == '\0') {
                         chunk->columns[col].bitmap[row] = 1;
                     }else {
                         chunk->columns[col].bitmap[row] = 0;
@@ -153,7 +154,7 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
                             bool_val = false;
                         }
                     ((bool *)chunk->columns[col].data)[row] = bool_val;
-                    if (token != NULL) {
+                    if ((bool *)bool_val != NULL) {
                         chunk->columns[col].bitmap[row] = 1;
                     }else {
                         chunk->columns[col].bitmap[row] = 0;
@@ -171,7 +172,7 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
             token = extract_value(&moving_line);
         }
 
-        if (token != NULL && strcmp(token, "") != 0 ) {
+        if (token != NULL &&  token[0] == '\0' ) {
             return bdb_error_set(err, BDB_ERR_PARSE,
                                  "line %llu: more values than the %llu columns in the header",
                                  line_no,
@@ -182,21 +183,19 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
     return BDB_OK;
 }
 
-BdbStatus read_csv(const char *path, BdbChunkFn on_chunk, BdbError *err) {
+BdbStatus csv_open(CSV_READER *reader, const char *path, BdbError *err) {
     FILE *file = fopen(path, "rb");
+
     if (file == NULL) {
         return bdb_error_set(err, BDB_ERR_OPEN, "could not open '%s'", path);
     }
-    char *buffer = malloc(BDB_CSV_MAX_LINE);
-    if (buffer == NULL) {
-        free(buffer);
+    reader->file = file;
+    reader->buffer = malloc(BDB_CSV_MAX_LINE);
+
+    if (reader->buffer == NULL) {
+        free(reader->buffer);
         return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for line buffer");
     }
-
-    BdbStatus status = BDB_OK;
-    uint64_t line_no = 0;
-    uint64_t row = 0;
-    char* dest = NULL;
 
     CHUNK chunk = {
         .col_count = 0,
@@ -204,47 +203,57 @@ BdbStatus read_csv(const char *path, BdbChunkFn on_chunk, BdbError *err) {
         .columns = NULL
     };
 
-    while (true) {
-        status = read_next_line(file, buffer, err, &line_no, &dest);
-        if (status != BDB_OK) break;
+    reader->chunk = chunk;
 
-        if (dest == NULL) {
-            break;
-        }
+    chunk_init(&reader->chunk, 0, err);
+    BdbStatus status = BDB_OK;
 
-        if (line_no == 1) {
-            parse_header(&chunk, buffer, err);
-            continue;
-        }
+    uint64_t line_no = 0;
+    char* dest = NULL;
 
-        if (buffer[strspn(buffer, "\r\n")] == '\0') {
-            continue;  // skip blank lines
-        }
 
-        if (line_no == 2) {
-            status = detect_types_allo_chunk_buffers(&chunk, buffer, line_no, err);
-        }
+    status = read_next_line(reader->file, reader->buffer, err, &line_no, &dest);
+    if (status != BDB_OK) return status;
 
-        status = parse_row(&chunk, buffer, chunk.count, line_no, err);
-        chunk.count++;
-
-        if (chunk.count == BDB_VECTOR_SIZE) {
-            on_chunk(&chunk, NULL, err);
-            chunk_reset(&chunk);
-        }
+    if (dest == NULL) {
+        return bdb_error_set(err, BDB_ERR_PARSE, "line 1: header has no columns");
     }
-
-    if (chunk.count > 0){
-        on_chunk(&chunk, NULL, err);
-        chunk_reset(&chunk);
-    }
-
-    // BdbStatus status = get_total_rows(file, buffer, &table->row_count, err);
-    // if (status != BDB_OK) { fclose(file); free(buffer); return status; }
-    // rewind(file);
-    //
-    // status = read_table(table, file, err, buffer);
-    fclose(file);  // closed on both paths
-    free(buffer);
+    parse_header(&reader->chunk, reader->buffer, err);
     return status;
+}
+
+BdbStatus csv_next_chunk(CSV_READER *r, const CHUNK **out, BdbError *err) {
+    *out = NULL;
+    chunk_reset(&r->chunk);
+    char *line = NULL;
+
+    while (r->chunk.count < BDB_VECTOR_SIZE) {
+        BdbStatus status = read_next_line(r->file, r->buffer, err, &r->line_no, &line);
+        if (status != BDB_OK) return status;
+        if (line == NULL) break;            // EOF
+        if (line[0] == '\0') continue;      // blank line
+
+        if (!r->have_types) {
+            status = detect_types_allo_chunk_buffers(&r->chunk, line, r->line_no, err);
+            if (status != BDB_OK) return status;
+            r->have_types = true;
+        }
+
+        status = parse_row(&r->chunk, line, r->chunk.count, r->line_no, err);
+        if (status != BDB_OK) return status;
+        r->chunk.count++;
+    }
+
+    if (r->chunk.count > 0) *out = &r->chunk;
+    return BDB_OK;
+}
+
+void csv_close(CSV_READER *r) {
+    chunk_free(&r->chunk);
+    if (r->file != NULL) fclose(r->file);
+    free(r->buffer);
+    r->file = NULL;
+    r->buffer = NULL;
+    r->have_types = false;
+    r->line_no = 0;
 }
