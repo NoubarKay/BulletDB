@@ -1,14 +1,14 @@
 //
 // Created by user on 9/24/2026.
 //
-#include "table.h"
+#include "core/table.h"
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "common.h"
+#include "common/common.h"
 
 size_t bdb_col_type_size(enum ColumnType type) {
     switch (type) {

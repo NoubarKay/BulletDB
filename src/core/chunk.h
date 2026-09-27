@@ -6,7 +6,13 @@
 #define BULLETDB_CHUNK_H
 #include <stdint.h>
 
-#include "table.h"
+#include "core/table.h"
+
+// Rows per chunk: the unit that moves through the engine.
+#define BDB_VECTOR_SIZE     2048
+// Rows per row group: the unit stored in .bdb files. Always a whole number
+// of chunks, so a chunk never spans two row groups.
+#define BDB_ROW_GROUP_SIZE  (60 * BDB_VECTOR_SIZE)
 
 typedef struct {
     uint64_t count; //Number of rows in the chunk;

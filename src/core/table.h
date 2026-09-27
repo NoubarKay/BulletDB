@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "common.h"
+#include "common/common.h"
 
 // Stored in .bdb files as one byte, so these values must not change.
 enum ColumnType {

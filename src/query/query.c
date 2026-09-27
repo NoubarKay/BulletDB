@@ -1,7 +1,7 @@
 #include <stdint.h>
-#include "query.h"
-#include "../common.h"
-#include "../table.h"
+#include "query/query.h"
+#include "common/common.h"
+#include "core/table.h"
 
 //
 // Created by user on 9/25/2026.

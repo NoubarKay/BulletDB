@@ -16,6 +16,9 @@ and keeps scan loops tight.
 > int64-only `TABLE`, so they're switched off until they're ported to chunks.
 > See [Current work](#current-work).
 
+For how the engine is built and why, and for the design of the next `.bdb`
+format, see **[docs/DESIGN.md](docs/DESIGN.md)**.
+
 ## Contents
 
 - [Building](#building)
@@ -425,7 +428,9 @@ chunks through the engine."
 3. [x] `main.c` pulls chunks and prints them
 4. [x] Split CSV fields in place, and rewrite `parse_row` as a single loop
        over the columns (see [Performance](#performance))
-5. [ ] **New `.bdb` format**: magic number and version, a type byte for each
+5. [ ] **New `.bdb` format** (full spec in
+       [docs/DESIGN.md](docs/DESIGN.md#part-2-bdb-v1-file-format-proposed)):
+       magic number and version, a type byte for each
        column, and for each row group each column's values at their real size
        plus its bitmap. It ends with a **footer** that holds `row_count`,
        column names and types, and the byte offset of each row group, with

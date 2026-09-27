@@ -5,8 +5,8 @@
 #ifndef BULLETDB_QUERY_H
 #define BULLETDB_QUERY_H
 #include <stdint.h>
-#include "../common.h"
-#include "../table.h"
+#include "common/common.h"
+#include "core/table.h"
 
 enum BdbAggregate {
     BDB_AGG_SUM,

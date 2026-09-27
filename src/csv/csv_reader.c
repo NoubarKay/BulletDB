@@ -1,14 +1,12 @@
-#include "csv.h"
+#include "csv/csv_reader.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "engine/table.h"
-#include "engine/common.h"
-#include "engine/sink/bdb_sink.h"
-#include "engine/storage/format.h"
-#include "engine/csv/csv_tokenize.h"
+#include "core/table.h"
+#include "common/common.h"
+#include "csv/csv_tokenize.h"
 
 static BdbStatus parse_header(CHUNK* chunk, char *line, BdbError *err) {
     char *token = strtok(line, DELIMS);

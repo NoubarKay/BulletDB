@@ -1,26 +1,22 @@
 cmake_minimum_required(VERSION 4.3)
-project(BulletDB)
+project(BulletDB C)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_executable(BulletDB main.c
-        src/engine/common.h
-        src/engine/table.h
-        src/engine/table.c
-        src/csv.h
-        src/csv.c
-        src/engine/common.c
-        src/engine/storage/bdb.h
-        src/engine/storage/bdb.c
-        src/engine/storage/format.h
-        src/engine/storage/io.h
-        src/engine/storage/io.c
-        src/engine/storage/bdb_reader.c
-        src/engine/query/query.h
-        src/engine/query/query.c
-        src/engine/csv/csv_tokenize.h
-        src/engine/csv/csv_tokenize.c
-        src/engine/chunk.h
-        src/engine/sink/bdb_sink.h
-        src/chunk.c)
+add_executable(BulletDB
+        main.c
+        src/common/common.c
+        src/core/chunk.c
+        src/core/table.c
+        src/csv/csv_reader.c
+        src/csv/csv_tokenize.c
+        src/query/query.c
+        src/storage/io.c
+        src/storage/bdb_writer.h
+        src/storage/bdb_writer.c)
+
+# Include paths are relative to src/, e.g. #include "core/chunk.h"
+target_include_directories(BulletDB PRIVATE src)
+
 add_executable(test test.c)

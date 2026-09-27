@@ -5,7 +5,7 @@
 #ifndef BULLETDB_IO_H
 #define BULLETDB_IO_H
 #include <stdio.h>
-#include "../common.h"
+#include "common/common.h"
 
 BdbStatus read_bytes(FILE *file, void *destination, size_t item_size, size_t count, BdbError *err, const char *msg);
 

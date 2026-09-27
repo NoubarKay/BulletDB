@@ -4,10 +4,12 @@
 
 #ifndef BULLETDB_CSV_H
 #define BULLETDB_CSV_H
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
-#include "engine/common.h"
-#include "engine/sink/bdb_sink.h"
+#include "common/common.h"
+#include "core/chunk.h"
 
 typedef struct {
     FILE *file;

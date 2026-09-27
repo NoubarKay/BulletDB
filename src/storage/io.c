@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include "../common.h"
+#include "common/common.h"
 //
 // Created by user on 9/25/2026.
 //

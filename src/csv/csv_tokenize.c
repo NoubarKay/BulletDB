@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../storage/format.h"
-#include "../common.h"
+#include "common/common.h"
+#include "csv/csv_tokenize.h"
 
 static void trim_trailing(char *src) {
     size_t length = strlen(src);

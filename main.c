@@ -8,15 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "src/engine/table.h"
-#include "src/csv.h"
-#include "src/engine/common.h"
-#include "src/engine/query/query.h"
-#include "src/engine/storage/bdb.h"
-#include "src/engine/sink/bdb_sink.h"
+#include "core/table.h"
+#include "csv/csv_reader.h"
+#include "common/common.h"
+#include "query/query.h"
+#include "storage/bdb_writer.h"
 
-// BdbChunkFn that prints each chunk. ctx is an optional uint64_t counter
-// used to number the chunks; pass NULL to skip numbering.
+// Prints one chunk as a table.
 static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
     (void)err;
 
@@ -34,6 +32,8 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
 int main(int argc, char *argv[]) {
     BdbError err = {0};
     CSV_READER reader = {0};
+    BDB_WRITER writer;
+
     const CHUNK *chunk;
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <file.csv>\n", argv[0]);
@@ -47,12 +47,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    status = bdb_writer_open(&writer, "test.bdb", &err);
+
+    if (status != BDB_OK) {
+        fprintf(stderr, "error: %s\n", err.message);
+        return 1;
+    }
+
     while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
         print_chunk_cb(chunk, &err);
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
     csv_close(&reader);
+    bdb_writer_close(&writer);
     return status == BDB_OK ? 0 : 1;
 
 
