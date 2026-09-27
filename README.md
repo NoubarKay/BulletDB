@@ -106,9 +106,10 @@ Rules:
   | A decimal number, such as `20.00` | `DOUBLE` | `double` |
   | Anything else | `STR` | not supported yet, so the import fails |
 
-- An empty field (`2024,,true`) is stored as **NULL** for `INT` and `DOUBLE`
-  columns.
-- Each row must have one value per column.
+- An empty field (`2024,,true`) is stored as **NULL** in every column type.
+- Spaces around a value are ignored (`2023, 20.00 ,true` works).
+- Each row must have exactly one value per column. A trailing comma
+  (`2025,50.00,true,`) counts as an extra, empty value, so it's an error.
 - Blank lines are skipped.
 - Both `\n` and `\r\n` line endings work.
 - A line longer than `BDB_CSV_MAX_LINE` (1 MiB) is rejected, and so is a field
@@ -117,9 +118,31 @@ Rules:
 Errors name the line:
 
 ```text
+error: line 7: expected 3 values, got 2
 error: line 9: more values than the 3 columns in the header
 error: line 12: value in column 'price' is longer than 255 characters
 ```
+
+### How a line is split
+
+`next_field` in `csv_tokenize.c` splits a line **in place**. It writes `'\0'`
+over each comma, trims spaces by moving the start and end pointers, and
+returns a pointer into the line buffer. Nothing is copied or allocated:
+
+```
+buffer:          "2023, 20.00 ,true"
+after field 1:   "2023\0 20.00 ,true"        returns "2023"
+after field 2:   "2023\0 20.00\0\0true"      returns "20.00"
+after field 3:                               returns "true", then NULL
+```
+
+Two things follow from this:
+- A line can only be split once. The first data row is split twice (once to
+  detect types, once to store the values), so type detection works on a
+  copy.
+- A field pointer is valid only until the next line is read into the buffer.
+  Values are converted and stored in the chunk right away, so this is fine
+  for numbers and BOOL. Strings, once they exist, will have to be copied.
 
 ## Architecture
 
@@ -379,7 +402,7 @@ BulletDB/
         ├── table.c / .h         COLUMN, TABLE, ColumnType, print_table, find, free
         ├── chunk.h              CHUNK and its functions
         ├── csv/
-        │   └── csv_tokenize.c/.h  read_next_line, extract_value
+        │   └── csv_tokenize.c/.h  read_next_line, next_field
         ├── sink/
         │   └── bdb_sink.h       BdbChunkFn (from the earlier push design, now unused)
         ├── query/
@@ -400,8 +423,8 @@ chunks through the engine."
 2. [x] `CSV_READER` as a pull-based source (`csv_open` / `csv_next_chunk` /
        `csv_close`), one pass, no row-count pass or `rewind`
 3. [x] `main.c` pulls chunks and prints them
-4. [ ] Clean up the CSV reader (see [Known bugs](#known-bugs)), and split
-       fields in place (see [Performance](#performance))
+4. [x] Split CSV fields in place, and rewrite `parse_row` as a single loop
+       over the columns (see [Performance](#performance))
 5. [ ] **New `.bdb` format**: magic number and version, a type byte for each
        column, and for each row group each column's values at their real size
        plus its bitmap. It ends with a **footer** that holds `row_count`,
@@ -420,23 +443,36 @@ chunks through the engine."
 
 ## Performance
 
-A first measurement of the CSV reader, before any tuning, was about **1.7 ms
-per 2048-row chunk** (3 columns), or roughly 800 ns per row. That's around
-1.2 million rows per second, or about 25 MB/s. Planned improvements, biggest
-payoff first:
+CSV reader timings, per 2048-row chunk of a 3-column file (`INT`, `DOUBLE`,
+`BOOL`), measured around each `csv_next_chunk` call:
 
-1. **Split fields in place.** `extract_value` currently makes two `malloc`
-   calls and one `free` for every field. Writing `'\0'` over each comma and
-   returning a pointer into the line buffer removes all of them.
-2. **Cheaper checks.** `token[0] == '\0'` instead of `strcmp(token, "")`, no
-   repeated `strlen`, and checking the first character before `strcasecmp`.
-3. **A dedicated integer parser** instead of `strtoll`.
-4. **Reading in large blocks** (`fread` plus `memchr`) instead of calling
-   `fgets` once per line.
-5. Later: SIMD scanning and parsing on several threads.
+| Version | Per chunk | Per row | Rows per second |
+|---------|-----------|---------|-----------------|
+| Copying each field (`extract_value`: 2 × `malloc` + `free` per field) | ~1.67 ms | ~820 ns | ~1.2 M |
+| **Splitting fields in place** (`next_field`) | **~0.91 ms** | **~445 ns** | **~2.2 M** |
 
-Measure with a Release build (`-O2`) and a large file, and ignore the first
-chunk, which also pays for type detection and allocation.
+Splitting in place made the reader about **1.8 times faster**. It also fixed
+a leak of one allocation per field.
+
+Both runs were on the same machine with the same build settings, most likely
+a Debug build (`-O0`). A Release build (`-O2`) should be noticeably faster.
+
+Possible next speedups, biggest payoff first:
+
+1. **Cheaper checks.** Have `next_field` return the field's length instead
+   of calling `strlen` again for the max-field check, and check the first
+   character before calling `strcasecmp` for BOOL.
+2. **A dedicated integer parser** instead of `strtoll`.
+3. **Reading in large blocks** (`fread` plus `memchr`) instead of calling
+   `fgets` once per line. `fgets` locks the `FILE` on every call, and
+   `read_next_line` scans each line with `strlen` twice.
+4. Later: SIMD scanning and parsing on several threads. `strtod` is also
+   slow, but replacing it correctly needs a specialized algorithm.
+
+To measure, time each `csv_next_chunk` call with a monotonic clock
+(`QueryPerformanceCounter` on Windows, `clock_gettime(CLOCK_MONOTONIC)`
+elsewhere), and turn off printing. Use a Release build and a large file, and
+don't read much into the first chunk or a single slow chunk.
 
 ## Known limitations
 
@@ -454,41 +490,29 @@ chunk, which also pays for type detection and allocation.
 Things that are broken right now, most serious first.
 
 **Crashes or wrong data**
-- [ ] `csv_open` counts lines in a local `line_no` instead of
-      `reader->line_no`, so after the header the count restarts at 0 and
-      every error message names the line before the real one
 - [ ] `csv_open` ignores the status returned by `parse_header`
 - [ ] An empty value in the first data row fails the import:
       `detect_file_type("")` returns `STR`, which is rejected
-- [ ] A first data row with fewer values than the header leaves the missing
-      columns unallocated, so the next row writes through a `NULL` pointer
-- [ ] A trailing comma (`2025,50.00,true,`) sets that row's first value to
-      NULL: the extra empty token makes the outer `while` in `parse_row` run
-      again
-- [ ] An empty `BOOL` value is stored as `false` and marked valid instead of
-      NULL
 
 **Memory**
-- [ ] The tokens returned by `extract_value` are never freed by
-      `detect_types_allo_chunk_buffers` or `parse_row`, so every field leaks
-      one allocation. `destination2` also isn't checked for `NULL`. Splitting
-      fields in place fixes both.
-- [ ] The `bitmap` `calloc` in `detect_types_allo_chunk_buffers` isn't checked
-      for `NULL`
 - [ ] `free_table` doesn't free `bitmap`
 - [ ] If `csv_open` fails, `main` returns without calling `csv_close`, so the
       file and buffer leak
 
 **Cleanup**
-- [ ] `bdb_sink.h` (`BdbChunkFn`) and the `ctx` parameter of `print_chunk_cb`
-      are left over from the earlier push design
+- [ ] `bdb_sink.h` (`BdbChunkFn`) is left over from the earlier push design,
+      and the comment above `print_chunk_cb` still mentions `ctx`
 - [ ] `chunk_init` takes a `col_count` and an `err` that it doesn't need
+- [ ] `parse_header` still splits with `strtok`, so column names aren't
+      trimmed and an empty name (`year,,price`) is skipped instead of
+      reported. It could use `next_field` like the rows.
 
 ## Roadmap
 
 - [x] CSV import with line-level error messages
 - [x] Typed columns (`INT`, `DOUBLE`, `BOOL`) with NULL bitmaps
 - [x] Pull-based CSV reader that streams fixed-size chunks
+- [x] In-place CSV field splitting (1.8 times faster, no allocations per field)
 - [x] Bordered table printer
 - [x] Save and load tables in `.bdb`, with row groups (old int64 format)
 - [x] `SUM` over a column, with single-condition filters (old int64 engine)

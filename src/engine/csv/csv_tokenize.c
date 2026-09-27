@@ -6,58 +6,32 @@
 
 #include "../storage/format.h"
 #include "../common.h"
-//
-// Created by user on 9/26/2026.
-//
 
-static void trim_string(const char *src, char *dst) {
-    if (src == NULL) {
-        return;
-    }
-    while (isspace((unsigned char)*src)) src++;
-    size_t len = strlen(src);
-    while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
-    strncpy(dst, src, len);
-    if (dst != NULL) {
-        dst[len] = '\0';
-    }
-}
 static void trim_trailing(char *src) {
     size_t length = strlen(src);
     while (length > 0 && isspace((unsigned char)src[length - 1])) length--;
     src[length] = '\0';
 }
 
-char* extract_value(char **line) {
-    // If the input string is empty or we reached the end, return NULL
-    if (*line == NULL || **line == '\0') {
-        return NULL;
-    }
+char *next_field(char **cursor) {
+    char *start = *cursor;
+    if (start == NULL) return NULL;
 
-    const char *current_start = *line;
-    const char *next_comma = strchr(current_start, ',');
-    int length;
-
-    if (next_comma != NULL) {
-        length = next_comma - current_start;
-        // Advance the original pointer past the comma for the next call
-        *line = (char *)(next_comma + 1);
+    char *end;
+    char *comma = strchr(start, ',');
+    if (comma != NULL) {
+        *comma = '\0';
+        *cursor = comma + 1;
+        end = comma;
     } else {
-        length = strlen(current_start);
-        // No more commas, advance original pointer to the very end
-        *line = NULL;
+        end = start + strlen(start);
+        *cursor = NULL;
     }
 
-    // Allocate memory on the HEAP so it persists after returning
-    char *destination = malloc(length + 1);
-    char *destination2 = malloc(length + 1);
-    if (destination == NULL) return NULL; // Always check if malloc succeeded
-
-    strncpy(destination, current_start, length);
-    destination[length] = '\0';
-    trim_string(destination, destination2);
-    free(destination);
-    return destination2;
+    while (start < end && isspace((unsigned char)*start)) start++;
+    while (end > start && isspace((unsigned char)end[-1])) end--;
+    *end = '\0';
+    return start;
 }
 
 BdbStatus read_next_line(FILE *file, char *buffer, BdbError *err, uint64_t *line_no, char** dest) {

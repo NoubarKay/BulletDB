@@ -17,14 +17,9 @@
 
 // BdbChunkFn that prints each chunk. ctx is an optional uint64_t counter
 // used to number the chunks; pass NULL to skip numbering.
-static BdbStatus print_chunk_cb(const CHUNK *chunk, void *ctx, BdbError *err) {
+static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
     (void)err;
 
-    if (ctx != NULL) {
-        uint64_t *chunk_no = ctx;
-        printf("\nchunk %" PRIu64 " (%" PRIu64 " rows)\n", *chunk_no, chunk->count);
-        (*chunk_no)++;
-    }
 
     // A chunk has the same shape as a table, so borrow print_table.
     TABLE view = {
@@ -53,7 +48,7 @@ int main(int argc, char *argv[]) {
     }
 
     while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
-        print_chunk_cb(chunk, NULL, &err);
+        print_chunk_cb(chunk, &err);
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
@@ -116,8 +111,7 @@ int main(int argc, char *argv[]) {
     // printf("Sum of prices: %" PRId64 "\n", result);
     //
 
-    //free_table(&loaded);
-    return 0;
+    //free_table(&loaded)
 }
 
 

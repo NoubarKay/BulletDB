@@ -9,7 +9,7 @@
 #ifndef BULLETDB_CSV_TOKENIZE_H
 #define BULLETDB_CSV_TOKENIZE_H
 
-char* extract_value(char **line);
+char *next_field(char **cursor);
 BdbStatus read_next_line(FILE *file, char *buffer, BdbError *err, uint64_t *line_no, char** dest);
 
 #endif //BULLETDB_CSV_TOKENIZE_H
