@@ -6,10 +6,9 @@
 
 #include "engine/table.h"
 #include "engine/common.h"
+#include "engine/storage/format.h"
+#include "engine/csv/csv_tokenize.h"
 
-#define DELIMS ",\r\n"
-#define BDB_CSV_MAX_LINE (1024 * 1024)
-#define BDB_CSV_MAX_FIELD 255
 
 static uint64_t get_total_rows(FILE *file, char *buffer) {
     uint64_t num_of_rows = 0;
@@ -58,83 +57,42 @@ static BdbStatus parse_header(TABLE *table, char *line, BdbError *err) {
     return BDB_OK;
 }
 
-void trim_string(const char *src, char *dst) {
-    if (src == NULL) {
-        return;
-    }
-    while (isspace((unsigned char)*src)) src++;
-    size_t len = strlen(src);
-    while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
-    strncpy(dst, src, len);
-    dst[len] = '\0';
-}
+
 
 static enum ColumnType detect_file_type(const char *entry) {
 
-    char str[256];
-    trim_string(entry, str);
-
     // 2. Guard against an empty string after trimming
-    if (str[0] == '\0') {
+    if (entry[0] == '\0') {
         return BDB_COL_STR;
     }
 
     // Boolean Check
-    if (strcasecmp(str, "true") == 0  || strcasecmp(str, "false") == 0 ||
-        strcasecmp(str, "t") == 0     || strcasecmp(str, "f") == 0     ||
-        strcasecmp(str, "yes") == 0   || strcasecmp(str, "no") == 0) {
+    if (strcasecmp(entry, "true") == 0  || strcasecmp(entry, "false") == 0 ||
+        strcasecmp(entry, "t") == 0     || strcasecmp(entry, "f") == 0     ||
+        strcasecmp(entry, "yes") == 0   || strcasecmp(entry, "no") == 0) {
         return BDB_COL_BOOL;
         }
 
     char *endptr;
 
     // Integer Check (Passing 'str' instead of 'entry')
-    strtol(str, &endptr, 10);
+    strtol(entry, &endptr, 10);
     // Ensure endptr actually moved (endptr != str) and reached the end of the string
-    if (endptr != str && *endptr == '\0') {
+    if (endptr != entry && *endptr == '\0') {
         return BDB_COL_INT;
     }
 
     // Double Check (Passing 'str' instead of 'entry')
-    strtod(str, &endptr);
+    strtod(entry, &endptr);
     // Ensure endptr actually moved (endptr != str) and reached the end of the string
-    if (endptr != str && *endptr == '\0') {
+    if (endptr != entry && *endptr == '\0') {
         return BDB_COL_DOUBLE;
     }
 
     return BDB_COL_STR;
 }
 
-static char* extract_value(char **line) {
-    // If the input string is empty or we reached the end, return NULL
-    if (*line == NULL || **line == '\0') {
-        return NULL;
-    }
 
-    const char *current_start = *line;
-    const char *next_comma = strchr(current_start, ',');
-    int length;
-
-    if (next_comma != NULL) {
-        length = next_comma - current_start;
-        // Advance the original pointer past the comma for the next call
-        *line = (char *)(next_comma + 1);
-    } else {
-        length = strlen(current_start);
-        // No more commas, advance original pointer to the very end
-        *line = NULL;
-    }
-
-    // Allocate memory on the HEAP so it persists after returning
-    char *destination = malloc(length + 1);
-    char *destination2 = malloc(length + 1);
-    if (destination == NULL) return NULL; // Always check if malloc succeeded
-
-    strncpy(destination, current_start, length);
-    destination[length] = '\0';
-    trim_string(destination, destination2);
-    return destination2;
-}
 
 static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
                            uint64_t line_no, BdbError *err) {
@@ -229,9 +187,13 @@ static BdbStatus parse_row(TABLE *table, char *line, uint64_t row,
 static BdbStatus read_table(TABLE *table, FILE *file, BdbError *err, char * buffer) {
     uint64_t line_no = 0;
     uint64_t row = 0;
+    char* dest = NULL;
+    BdbStatus status = BDB_OK;
 
-    while (fgets(buffer, BDB_CSV_MAX_LINE, file) != NULL) {
-        line_no++;
+
+    while (true) {
+        status = read_next_line(file, buffer, err, &line_no, &dest);
+        if (status != BDB_OK) return status;
 
         if (line_no == 1) {
             BdbStatus status = parse_header(table, buffer, err);
@@ -243,12 +205,16 @@ static BdbStatus read_table(TABLE *table, FILE *file, BdbError *err, char * buff
             continue;  // skip blank lines
         }
 
-        if (row >= table->row_count) {
+        if (dest == NULL) {
+            break;
+        }
+
+        if (row > table->row_count) {
             return bdb_error_set(err, BDB_ERR_PARSE,
                                  "file has more rows than counted (changed while reading?)");
         }
 
-        BdbStatus status = parse_row(table, buffer, row, line_no, err);
+        status = parse_row(table, buffer, row, line_no, err);
         if (status != BDB_OK) return status;
         row++;
     }

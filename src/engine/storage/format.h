@@ -13,4 +13,8 @@
 #define BDB_GROUP_SIZE 2
 #define BDB_MAX_GROUP_SIZE 100
 
+#define DELIMS ",\r\n"
+#define BDB_CSV_MAX_LINE (1024 * 1024)
+#define BDB_CSV_MAX_FIELD 255
+
 #endif //BULLETDB_FORMAT_H
