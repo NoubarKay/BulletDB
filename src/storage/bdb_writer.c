@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "bdb_format.h"
+#include "memory.h"
 
 BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
     *writer = (BDB_WRITER){0};
@@ -55,12 +56,30 @@ static BdbStatus init_group(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
     }
     w->have_schema = true;
 
-
     return BDB_OK;
 }
 
 static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
+      if (w->group_count == w->groups_capacity) {                        // full → grow
+          uint32_t old_cap = w->groups_capacity;
+          uint32_t new_cap = GROW_CAPACITY(old_cap);
+
+          uint32_t *rows = GROW_ARRAY(uint32_t, w->group_rows, old_cap, new_cap);
+          if (rows == NULL) return bdb_error_set(err, BDB_ERR_NOMEM, "could not grow group list");
+          w->group_rows = rows;
+
+          uint64_t *offs = GROW_ARRAY(uint64_t, w->offsets,
+                                      (size_t)old_cap * w->col_count,
+                                      (size_t)new_cap * w->col_count);    // × col_count
+          if (offs == NULL) return bdb_error_set(err, BDB_ERR_NOMEM, "could not grow offsets");
+          w->offsets = offs;
+
+          w->groups_capacity = new_cap;
+      }
+
     for (uint64_t i=0; i < w->group.col_count; i++) {
+        size_t offset = _ftelli64(w->file);
+        w->offsets[w->group_count * w->col_count + i] = offset;
         size_t col_type_size = bdb_col_type_size(w->group.columns[i].type);
 
         size_t written = fwrite(w->group.columns[i].bitmap, 1, w->group.count, w->file);
@@ -73,7 +92,9 @@ static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
         }
     }
     w->row_count+=w->group.count;
+    w->group_rows[w->group_count] = w->group.count;
     w->group_count++;
+
     chunk_reset(&w->group);
     return BDB_OK;
 }
@@ -113,13 +134,27 @@ BdbStatus bdb_writer_append(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
 static BdbStatus bdb_write_footer(BDB_WRITER *w, BdbError *err) {
     fwrite(&w->row_count, sizeof(uint64_t), 1, w->file);
     fwrite(&w->col_count, sizeof(uint16_t), 1, w->file);
+
+    for (int i = 0; i < w->col_count; i++) {
+        int16_t length = strlen(w->group.columns[i].name);
+        fwrite(&length, sizeof(uint16_t), 1, w->file);
+        fwrite(w->group.columns[i].name, length, 1, w->file);
+        fwrite(&w->group.columns[i].type, sizeof(uint8_t), 1, w->file);
+    }
+
+    fwrite(&w->group_count, sizeof(uint32_t), 1, w->file);
 }
 
 BdbStatus bdb_writer_finish(BDB_WRITER *w, BdbError *err) {
     if (w->group.count > 0)
         bdb_write_group(w, err);
 
+
+    uint64_t footer_offset = (uint64_t)ftell(w->file);
     bdb_write_footer(w, err);
+
+    fwrite(&footer_offset, sizeof(uint64_t), 1, w->file);
+    fwrite(BDB_MAGIC, BDB_MAGIC_SIZE, 1, w->file);
 
     if (fflush(w->file) != 0) {
         return bdb_error_set(err, BDB_ERR_IO, "could not flush file");

@@ -13,6 +13,7 @@
 #include "common/common.h"
 #include "query/query.h"
 #include "storage/bdb_writer.h"
+#include "storage/debug.h"
 
 // Prints one chunk as a table.
 static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
@@ -61,6 +62,8 @@ int main(int argc, char *argv[]) {
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
     bdb_writer_finish(&writer, &err);
+
+    bdb_writer_debug_dump(&writer, stdout);
 
     csv_close(&reader);
     bdb_writer_close(&writer);

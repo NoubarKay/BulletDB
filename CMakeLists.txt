@@ -14,7 +14,10 @@ add_executable(BulletDB
         src/query/query.c
         src/storage/io.c
         src/storage/bdb_writer.h
-        src/storage/bdb_writer.c)
+        src/storage/bdb_writer.c
+        src/storage/memory.h
+        src/storage/memory.c
+        src/storage/debug.c)
 
 # Include paths are relative to src/, e.g. #include "core/chunk.h"
 target_include_directories(BulletDB PRIVATE src)
