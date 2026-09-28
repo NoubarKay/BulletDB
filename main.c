@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    status = bdb_writer_open(&writer, "test.bdb", &err);
+    status = bdb_writer_open(&writer, "test-1.bdb", &err);
 
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n", err.message);
@@ -55,9 +55,12 @@ int main(int argc, char *argv[]) {
     }
 
     while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
+        bdb_writer_append(&writer, chunk, &err);
         print_chunk_cb(chunk, &err);
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
+
+    bdb_writer_finish(&writer, &err);
 
     csv_close(&reader);
     bdb_writer_close(&writer);

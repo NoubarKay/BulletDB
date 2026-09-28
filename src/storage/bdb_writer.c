@@ -36,7 +36,7 @@ void bdb_writer_close(BDB_WRITER *writer) {
 }
 
 static BdbStatus init_group(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
-    CHUNK *g = w->group;
+    CHUNK *g = &w->group;
     g->columns = calloc(chunk->col_count, sizeof(COLUMN));
     if (g->columns == NULL) {
         return bdb_error_set(err, BDB_ERR_NOMEM, "could not allocate group columns");
@@ -57,4 +57,71 @@ static BdbStatus init_group(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
 
 
     return BDB_OK;
+}
+
+static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
+    for (uint64_t i=0; i < w->group.col_count; i++) {
+        size_t col_type_size = bdb_col_type_size(w->group.columns[i].type);
+
+        size_t written = fwrite(w->group.columns[i].bitmap, 1, w->group.count, w->file);
+        if (written != w->group.count) {
+            return bdb_error_set(err, BDB_ERR_IO, "failed to write bitmap for column '%s'", w->group.columns[i].name);
+        }
+        written = fwrite(w->group.columns[i].data, col_type_size, w->group.count, w->file);
+        if (written != w->group.count) {
+            return bdb_error_set(err, BDB_ERR_IO, "failed to write data for column '%s'", w->group.columns[i].name);
+        }
+    }
+    w->row_count+=w->group.count;
+    w->group_count++;
+    chunk_reset(&w->group);
+    return BDB_OK;
+}
+
+BdbStatus bdb_writer_append(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
+    CHUNK *g = &w->group;
+    BdbStatus status = BDB_OK;
+
+    if (!w->have_schema) {
+        status = init_group(w, chunk, err);
+        if (status != BDB_OK)
+            return status;
+
+        w->col_count = g->col_count;
+    }
+
+    //if no more space in group
+    if (w->group.count + chunk-> count > BDB_ROW_GROUP_SIZE) {
+        return bdb_error_set(err, BDB_ERR_INVALID, "chunk size exceeds row group size");
+    }
+
+    for (uint64_t c = 0; c < g->col_count; c++) {
+        size_t col_type_size = bdb_col_type_size(g->columns[c].type);
+        memcpy(g->columns[c].data + w->group.count * col_type_size, chunk->columns[c].data, chunk->count * col_type_size);
+        memcpy(g->columns[c].bitmap + g->count,
+               chunk->columns[c].bitmap, chunk->count);
+    }
+
+    g->count += chunk->count;
+
+    if (g->count == BDB_ROW_GROUP_SIZE) {
+        return bdb_write_group(w, err);
+    }
+    return BDB_OK;
+}
+
+static BdbStatus bdb_write_footer(BDB_WRITER *w, BdbError *err) {
+    fwrite(&w->row_count, sizeof(uint64_t), 1, w->file);
+    fwrite(&w->col_count, sizeof(uint16_t), 1, w->file);
+}
+
+BdbStatus bdb_writer_finish(BDB_WRITER *w, BdbError *err) {
+    if (w->group.count > 0)
+        bdb_write_group(w, err);
+
+    bdb_write_footer(w, err);
+
+    if (fflush(w->file) != 0) {
+        return bdb_error_set(err, BDB_ERR_IO, "could not flush file");
+    }
 }
