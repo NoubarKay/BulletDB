@@ -1,11 +1,13 @@
 # BulletDB design
 
-This document describes how BulletDB is built today, and the design of the
-next piece: the `.bdb` v1 file format with its writer and reader.
+This document describes how BulletDB is built today, and the `.bdb` v1 file
+format with its writer and reader.
 
-- Part 1, [Current design](#part-1-current-design), is what's in the code now.
-- Part 2, [.bdb v1](#part-2-bdb-v1-file-format-proposed), is agreed but not
-  built yet.
+- Part 1, [Current design](#part-1-current-design), covers the data model and
+  the CSV side.
+- Part 2, [.bdb v1](#part-2-bdb-v1-file-format), covers the file format. The
+  **writer is built** and produces files that match the spec byte for byte.
+  The **reader is designed but not built yet.**
 
 The README covers building, usage and the list of known bugs. This document
 covers the structure of the engine and the reasons behind it.
@@ -22,7 +24,7 @@ covers the structure of the engine and the reasons behind it.
   - [Memory ownership](#memory-ownership)
   - [Error handling](#error-handling)
   - [What's switched off](#whats-switched-off)
-- [Part 2: .bdb v1 file format (proposed)](#part-2-bdb-v1-file-format-proposed)
+- [Part 2: .bdb v1 file format](#part-2-bdb-v1-file-format)
   - [Requirements](#requirements)
   - [File layout](#file-layout)
   - [Row groups](#row-groups)
@@ -64,26 +66,31 @@ engine) and Parquet (row groups plus a footer on disk).
  file.csv
     │  read_next_line: one line at a time
     ▼
-┌──────────────────────────────┐
-│ CSV_READER  (src/csv.c)      │
-│   next_field splits a line   │
-│   parse_row fills ──▶ CHUNK  │   up to BDB_VECTOR_SIZE rows, reused
-└──────────────┬───────────────┘
+┌──────────────────────────────────┐
+│ CSV_READER  (csv/csv_reader.c)   │
+│   next_field splits a line       │
+│   parse_row fills ──▶ CHUNK      │   up to BDB_VECTOR_SIZE rows, reused
+└──────────────┬───────────────────┘
                │ csv_next_chunk(&reader, &chunk, &err)
                ▼
-      ┌──────────────────┐
-      │ main.c           │   prints each chunk
-      └──────────────────┘
+┌──────────────────────────────────┐
+│ BDB_WRITER  (storage/bdb_writer.c)│
+│   copies chunks into a row group │
+│   writes groups, footer, trailer │──▶ file.bdb   (see Part 2)
+└──────────────────────────────────┘
 ```
+
+All paths are under `src/`, which is the include root: code writes
+`#include "core/chunk.h"`.
 
 | Layer | Files | Job |
 |-------|-------|-----|
-| Tokenizer | `src/engine/csv/csv_tokenize.c` | Read one line (`read_next_line`), split it into fields (`next_field`) |
-| CSV reader | `src/csv.c` | Header, type detection, turning lines into chunks |
-| Chunk | `src/engine/chunk.h`, `src/chunk.c` | The batch of rows that moves through the engine |
-| Table / printer | `src/engine/table.c` | `COLUMN`, `TABLE`, `print_table` |
-| Common | `src/engine/common.c` | `BdbStatus`, `BdbError` |
-| Limits | `src/engine/storage/format.h` | `BDB_VECTOR_SIZE`, `BDB_ROW_GROUP_SIZE`, CSV limits |
+| Common | `common/common.c` | `BdbStatus`, `BdbError` |
+| Core | `core/chunk.c`, `core/table.c` | `COLUMN`, `CHUNK`, `TABLE`, types, `print_table`. `chunk.h` defines `BDB_VECTOR_SIZE` and `BDB_ROW_GROUP_SIZE` |
+| CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
+| Storage | `storage/bdb_writer.c`, `storage/bdb_format.h` | Chunks → `.bdb` file. `bdb_format.h` holds the magic, version and file limits |
+| Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` |
+| Query | `query/query.c` | Old int64 query engine, switched off |
 
 ## Data model
 
@@ -291,21 +298,20 @@ errors.
 ## What's switched off
 
 The first version of BulletDB loaded the whole CSV into one `TABLE` of
-`int64_t` columns, then wrote it to `.bdb`, read it back and ran a query.
-Those parts still exist but aren't called:
+`int64_t` columns, then wrote it to `.bdb`, read it back and ran a query. The
+old writer and reader have been deleted (the new writer in Part 2 replaces
+them, and git history keeps them). One part is still in the tree but not
+called:
 
 | Part | File | State |
 |------|------|-------|
-| Old `.bdb` writer | `storage/bdb.c` | int64 only, header-first format, takes a `TABLE` |
-| Old `.bdb` reader | `storage/bdb_reader.c` | same |
-| Query engine | `query/query.c` | scan loop commented out |
-| `BdbChunkFn` | `sink/bdb_sink.h` | left over from the push design, unused |
+| Query engine | `query/query.c` | int64 only, takes a `TABLE`, scan loop commented out |
 
-Part 2 replaces the writer and reader. The query engine is ported after that.
+It gets ported to chunks once the new reader exists.
 
 ---
 
-# Part 2: .bdb v1 file format (proposed)
+# Part 2: .bdb v1 file format
 
 ## Requirements
 
@@ -386,9 +392,9 @@ Because each column is one block at a known offset, a query that needs only
 
 ```
 row_count        u64          total rows in the file
-col_count        u32
+col_count        u16          at most BDB_MAX_COL_COUNT (100)
 for each column:
-    name_len     u32
+    name_len     u16
     name         name_len bytes, not null-terminated
     type         u8           enum ColumnType value
 group_count      u32
@@ -398,11 +404,21 @@ for each group:
         offset   u64          byte offset of this column's block
 ```
 
+Each field is written separately with its exact size, never as a C struct,
+so no compiler padding ends up in the file. Values whose in-memory type is
+wider (the `ColumnType` enum, `CHUNK.col_count`) are copied into a variable of
+the on-disk size before being written.
+
+**Every column in every group has its own offset** (decision 8). Today a
+column's offset could be calculated from the group's start, its row count and
+the column types, but compressed blocks won't have predictable sizes, so the
+format stores each offset rather than relying on that.
+
 Block sizes aren't stored, because they follow from the group's `row_count`
 and the column's type (see the table above). Once blocks can be compressed,
 a later version will store sizes too.
 
-Footer size: `8 + 4 + Σ(4 + name_len + 1) + 4 + group_count × (4 + 8 × col_count)`
+Footer size: `8 + 2 + Σ(2 + name_len + 1) + 4 + group_count × (4 + 8 × col_count)`
 bytes. For 3 columns and 1,000 groups (about 123 million rows), that's about
 28 KB.
 
@@ -421,36 +437,48 @@ bytes. For 3 columns and 1,000 groups (about 123 million rows), that's about
 
 ## Worked example
 
-Two columns, `year` (`INT`) and `flag` (`BOOL`), 3 rows, with a group size of
-2 to keep it small. Group 0 has 2 rows and group 1 has 1.
+A real file written by `BDB_WRITER` and checked byte by byte. It comes from
+this CSV (one row, five columns):
 
-| Bytes | Contents |
-|-------|----------|
-| 0–3 | `"BDB1"` |
-| 4–7 | version = 1 |
-| **Group 0** | |
-| 8–9 | `year` bitmap (2 bytes) |
-| 10–25 | `year` values (2 × 8) |
-| 26–27 | `flag` bitmap (2 bytes) |
-| 28–29 | `flag` values (2 × 1) |
-| **Group 1** | |
-| 30 | `year` bitmap (1 byte) |
-| 31–38 | `year` value (8) |
-| 39 | `flag` bitmap (1 byte) |
-| 40 | `flag` value (1) |
-| **Footer** (starts at 41) | |
-| 41–48 | row_count = 3 |
-| 49–52 | col_count = 2 |
-| 53–61 | name_len = 4, `"year"`, type = 0 |
-| 62–70 | name_len = 4, `"flag"`, type = 3 |
-| 71–74 | group_count = 2 |
-| 75–94 | group 0: row_count = 2, offsets 8 and 26 |
-| 95–114 | group 1: row_count = 1, offsets 30 and 39 |
-| **Trailer** | |
-| 115–122 | footer_offset = 41 |
-| 123–126 | `"BDB1"` |
+```csv
+ORDERNUMBER,QUANTITYORDERED,PRICEEACH,ORDERLINENUMBER,SALES
+10107,30,95.7,2,2871
+```
 
-The file is 127 bytes. This makes a good first test file for the reader.
+| Offset | Bytes | Contents |
+|--------|-------|----------|
+| **Header** | | |
+| 0x00 | `42 44 42 31` | `"BDB1"` |
+| 0x04 | `01 00 00 00` | version = 1 |
+| **Row group 0** (1 row) | | |
+| 0x08 | `01` + `7B 27 00 00 00 00 00 00` | `ORDERNUMBER`: valid, 10107 |
+| 0x11 | `01` + `1E 00 00 00 00 00 00 00` | `QUANTITYORDERED`: valid, 30 |
+| 0x1A | `01` + `CD CC CC CC CC EC 57 40` | `PRICEEACH`: valid, 95.7 (IEEE-754 double) |
+| 0x23 | `01` + `02 00 00 00 00 00 00 00` | `ORDERLINENUMBER`: valid, 2 |
+| 0x2C | `01` + `37 0B 00 00 00 00 00 00` | `SALES`: valid, 2871 |
+| **Footer** (starts at 0x35 = 53) | | |
+| 0x35 | `01 00 00 00 00 00 00 00` | row_count = 1 |
+| 0x3D | `05 00` | col_count = 5 |
+| 0x3F | `0B 00` `"ORDERNUMBER"` `00` | 11 characters, INT |
+| 0x4D | `0F 00` `"QUANTITYORDERED"` `00` | 15 characters, INT |
+| 0x5F | `09 00` `"PRICEEACH"` `01` | 9 characters, DOUBLE |
+| 0x6B | `0F 00` `"ORDERLINENUMBER"` `00` | 15 characters, INT |
+| 0x7D | `05 00` `"SALES"` `00` | 5 characters, INT |
+| 0x85 | `01 00 00 00` | group_count = 1 |
+| 0x89 | `01 00 00 00` | group 0: row_count = 1 |
+| 0x8D | 5 × u64 | group 0 offsets: 8, 17, 26, 35, 44 |
+| **Trailer** | | |
+| 0xB5 | `35 00 00 00 00 00 00 00` | footer_offset = 53 |
+| 0xBD | `42 44 42 31` | `"BDB1"` |
+
+The file is **193 bytes**. Every pointer leads to the right place: the
+trailer points at the footer, and each offset points at a column's bitmap
+byte (`01`). This is the first test file for the reader.
+
+A larger check: 160,000 rows of the same five columns give two groups
+(122,880 and 37,120 rows). Each column block is `rows × 9` bytes, the data
+ends at 8 + 160,000 × 45 = 7,200,008, and every offset starts exactly where
+the previous block ended (checked with `bdb_writer_debug_dump`).
 
 ## Validation
 
@@ -478,12 +506,17 @@ implementation guide with flow diagrams, see
 
 ```c
 typedef struct {
-    FILE    *file;
-    CHUNK    group;          // row group buffer: capacity BDB_ROW_GROUP_SIZE
-    uint64_t row_count;      // rows written so far
-    uint32_t group_count;
-    uint32_t *group_rows;    // row count of each group     (grows)
-    uint64_t *offsets;       // group_count × col_count      (grows)
+    FILE     *file;
+    CHUNK     group;           // row group buffer: capacity BDB_ROW_GROUP_SIZE
+    bool      have_schema;     // set by the first append
+
+    // Kept for the footer:
+    uint64_t  row_count;       // rows written so far
+    uint16_t  col_count;       // on-disk column count
+    uint32_t  group_count;     // groups written so far
+    uint32_t *group_rows;      // [group_count]            rows in each group
+    uint64_t *offsets;         // [group_count * col_count] offset of each column block
+    uint32_t  groups_capacity; // allocated length of group_rows (offsets: × col_count)
 } BDB_WRITER;
 
 BdbStatus bdb_writer_open  (BDB_WRITER *w, const char *path, BdbError *err);
@@ -494,10 +527,23 @@ void      bdb_writer_close (BDB_WRITER *w);
 
 | Function | Does |
 |----------|------|
-| `open` | Opens the file and writes the header (`"BDB1"`, version). |
-| `append` | On the first chunk, copies the schema (names, types) and allocates the group buffer. Then `memcpy`s the chunk's rows into the buffer. When the buffer holds `BDB_ROW_GROUP_SIZE` rows, writes the group: for each column, records `ftell` as its offset, then writes its bitmap and values. |
-| `finish` | Writes the last, partial group if there is one, then the footer, then the trailer. |
-| `close` | Frees everything and closes the file. Safe to call after an error, and safe to call twice. |
+| `open` | Zeroes the struct, opens the file and writes the header (`"BDB1"`, version). |
+| `append` | On the first chunk, copies the schema (names, types) into the group buffer and allocates it (`init_group`). Then `memcpy`s the chunk's values and bitmap onto the end of the buffer. When the buffer holds exactly `BDB_ROW_GROUP_SIZE` rows, writes the group. |
+| `write_group` (static) | Grows `group_rows` and `offsets` if they're full. For each column, records its offset with `_ftelli64` (64-bit, so offsets past 2 GB work), then writes its bitmap and values. Stores the group's row count, then increments `group_count`, and resets the buffer. |
+| `finish` | Writes the last, partial group if there is one. Records where the footer starts, writes the footer, then the trailer (that position plus `"BDB1"`), and flushes. Every write is checked. |
+| `close` | Frees the buffer and both arrays and closes the file. Safe to call after an error, and safe to call twice. It doesn't write anything, so a file closed without `finish` has no footer. |
+
+**Growing the arrays.** The number of groups isn't known in advance, so
+`group_rows` and `offsets` grow by doubling (`GROW_CAPACITY` / `GROW_ARRAY` in
+`storage/memory.h`, the same approach as clox). Capacity starts at 0 with
+`NULL` arrays. `write_group` grows only when `group_count == groups_capacity`,
+and the first grow (0 → 8) allocates through `realloc(NULL, ...)`. `offsets`
+is sized `capacity × col_count`.
+
+**Debugging.** `bdb_writer_debug_dump` in `storage/debug.c` prints the
+schema, each group's row count and each column's offset, and marks any block
+that doesn't start where the previous one ended. Call it after `finish` and
+before `close`.
 
 Because a row group is always a whole number of chunks, a chunk is always
 copied into one group in a single step, never split across two.
@@ -516,9 +562,13 @@ csv_close(&reader);
 ```
 
 **Memory:** one group buffer of `BDB_ROW_GROUP_SIZE × (1 + type_size)` bytes
-per column, about 1.1 MB per `INT` or `DOUBLE` column, plus 12 bytes of
-metadata per group (4 for its row count, 8 for each offset). The size of the
-CSV doesn't matter.
+per column, about 1.1 MB per `INT` or `DOUBLE` column, plus `4 + 8 ×
+col_count` bytes of metadata per group (its row count and one offset per
+column). The size of the CSV doesn't matter.
+
+**Known gap:** the schema comes from the first chunk. A CSV with a header but
+no data rows never calls `append`, so the file gets a footer with 0 columns
+and the header's names are lost.
 
 ## Reader
 
@@ -538,11 +588,31 @@ BdbStatus bdb_reader_next_chunk(BDB_READER *r, const CHUNK **out, BdbError *err)
 void      bdb_reader_close     (BDB_READER *r);
 ```
 
+**Only the header and footer are held in memory.** Row groups are never
+loaded whole: data is streamed one chunk at a time.
+
+```
+bdb_reader_open
+  ├─ header  (8 bytes)    read → check "BDB1" + version → discarded
+  ├─ trailer (12 bytes)   read → footer_offset, check magic → discarded
+  └─ footer               read → kept: row_count, schema, group_rows, offsets
+
+bdb_reader_next_chunk     one CHUNK buffer (2048 rows), reused
+```
+
 - `open` validates the file and loads the footer.
 - `next_chunk` reads the next (up to) 2048 rows of the current group. For
   each column, it seeks to `offset + row_in_group` for the bitmap and to
-  `offset + n + row_in_group × type_size` for the values. When a group runs
-  out, it moves to the next group. It returns `NULL` at the end.
+  `offset + n + row_in_group × type_size` for the values, where `n` is the
+  group's row count. When a group runs out, it moves to the next group. It
+  returns `NULL` at the end.
+
+Memory therefore doesn't depend on the file size: the footer is 8 bytes per
+column per group plus 4 per group, and the chunk buffer is about 18 KB per
+`INT` column.
+
+Seeks must be 64-bit (`_fseeki64` on Windows, `fseeko` elsewhere), because
+plain `fseek` takes a `long`, which is 32-bit on Windows.
 
 **The round-trip test:** CSV → writer → `test.bdb` → reader, then compare
 each chunk with the CSV's chunks. Same row count, same values, same bitmaps.
@@ -561,6 +631,9 @@ That's the payoff of the columnar layout.
 | 5 | Column block order | **Bitmap first, then values** | Either works. This fixes one. | — |
 | 6 | Block sizes in the footer | **Not stored, computed** | Follows from row count and type | Compression makes sizes variable |
 | 7 | Group row count | **Stored for every group** | Simple and explicit, with no special case for the last group | — |
+| 8 | Where blocks are found | **An offset per column per group** (not one offset per group) | A reader can seek straight to any column, and the format keeps working once compressed blocks have unpredictable sizes. Costs 8 bytes per column per group. | — |
+| 9 | Field sizes | `col_count` and `name_len` are **u16**, `group_count` and group `row_count` are **u32**, `row_count` and offsets are **u64** | Big enough for every limit, with no wasted bytes | A limit changes |
+| 10 | Reader memory | **Header and footer only**; data streamed in chunks | Memory stays fixed whatever the file size | — |
 
 ---
 

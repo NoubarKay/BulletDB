@@ -6,7 +6,7 @@ minimal `finish`. It covers writing row groups only. The footer and trailer
 come later.
 
 For the file format itself and the reasons behind it, see
-[DESIGN.md, Part 2](DESIGN.md#part-2-bdb-v1-file-format-proposed).
+[DESIGN.md, Part 2](DESIGN.md#part-2-bdb-v1-file-format).
 
 ## Contents
 

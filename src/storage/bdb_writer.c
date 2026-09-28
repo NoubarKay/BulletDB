@@ -29,6 +29,13 @@ BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
 void bdb_writer_close(BDB_WRITER *writer) {
     chunk_free(&writer->group);
 
+    free(writer->group_rows);
+    free(writer->offsets);
+    writer->group_rows = NULL;
+    writer->offsets = NULL;
+    writer->group_count = 0;
+    writer->groups_capacity = 0;
+
     if (writer->file != NULL) {
         fclose(writer->file);
         writer->file = NULL;
@@ -132,31 +139,69 @@ BdbStatus bdb_writer_append(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
 }
 
 static BdbStatus bdb_write_footer(BDB_WRITER *w, BdbError *err) {
-    fwrite(&w->row_count, sizeof(uint64_t), 1, w->file);
-    fwrite(&w->col_count, sizeof(uint16_t), 1, w->file);
-
-    for (int i = 0; i < w->col_count; i++) {
-        int16_t length = strlen(w->group.columns[i].name);
-        fwrite(&length, sizeof(uint16_t), 1, w->file);
-        fwrite(w->group.columns[i].name, length, 1, w->file);
-        fwrite(&w->group.columns[i].type, sizeof(uint8_t), 1, w->file);
+    if (fwrite(&w->row_count, sizeof(uint64_t), 1, w->file) != 1 ||
+        fwrite(&w->col_count, sizeof(uint16_t), 1, w->file) != 1) {
+        return bdb_error_set(err, BDB_ERR_IO, "could not write footer counts");
     }
 
-    fwrite(&w->group_count, sizeof(uint32_t), 1, w->file);
+    for (uint16_t i = 0; i < w->col_count; i++) {
+        const COLUMN *col = &w->group.columns[i];
+        uint16_t length = (uint16_t)strlen(col->name);
+        uint8_t  type   = (uint8_t)col->type;   // the enum is wider than 1 byte in memory
+
+        if (fwrite(&length, sizeof(length), 1, w->file) != 1 ||
+            fwrite(col->name, 1, length, w->file) != length ||
+            fwrite(&type, sizeof(type), 1, w->file) != 1) {
+            return bdb_error_set(err, BDB_ERR_IO, "could not write column '%s' to footer", col->name);
+        }
+    }
+
+    if (fwrite(&w->group_count, sizeof(uint32_t), 1, w->file) != 1) {
+        return bdb_error_set(err, BDB_ERR_IO, "could not write group count");
+    }
+
+
+    for (uint32_t g = 0; g < w->group_count; g++) {
+        if (fwrite(&w->group_rows[g], sizeof(uint32_t), 1, w->file) != 1) {
+            return bdb_error_set(err, BDB_ERR_IO, "could not write row count of group %u", g);
+        }
+
+        const uint64_t *group_offsets = &w->offsets[(size_t)g * w->col_count];
+        if (fwrite(group_offsets, sizeof(uint64_t), w->col_count, w->file) != w->col_count) {
+            return bdb_error_set(err, BDB_ERR_IO, "could not write offsets of group %u", g);
+        }
+    }
+
+    return BDB_OK;
 }
 
 BdbStatus bdb_writer_finish(BDB_WRITER *w, BdbError *err) {
-    if (w->group.count > 0)
-        bdb_write_group(w, err);
+    BdbStatus status;
 
+    // Last, partial group
+    if (w->group.count > 0) {
+        status = bdb_write_group(w, err);
+        if (status != BDB_OK) return status;
+    }
 
-    uint64_t footer_offset = (uint64_t)ftell(w->file);
-    bdb_write_footer(w, err);
+    // The footer starts here. _ftelli64 is 64-bit, so this stays right past 2 GB
+    int64_t position = _ftelli64(w->file);
+    if (position < 0) {
+        return bdb_error_set(err, BDB_ERR_IO, "could not get footer position");
+    }
+    uint64_t footer_offset = (uint64_t)position;
 
-    fwrite(&footer_offset, sizeof(uint64_t), 1, w->file);
-    fwrite(BDB_MAGIC, BDB_MAGIC_SIZE, 1, w->file);
+    status = bdb_write_footer(w, err);
+    if (status != BDB_OK) return status;
+
+    // Trailer: where the footer starts, then the magic again
+    if (fwrite(&footer_offset, sizeof(footer_offset), 1, w->file) != 1 ||
+        fwrite(BDB_MAGIC, 1, BDB_MAGIC_SIZE, w->file) != BDB_MAGIC_SIZE) {
+        return bdb_error_set(err, BDB_ERR_IO, "could not write trailer");
+    }
 
     if (fflush(w->file) != 0) {
         return bdb_error_set(err, BDB_ERR_IO, "could not flush file");
     }
+    return BDB_OK;
 }

@@ -33,7 +33,7 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
 int main(int argc, char *argv[]) {
     BdbError err = {0};
     CSV_READER reader = {0};
-    BDB_WRITER writer;
+    BDB_WRITER writer = {0};
 
     const CHUNK *chunk;
     if (argc != 2) {
@@ -52,16 +52,20 @@ int main(int argc, char *argv[]) {
 
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n", err.message);
+        csv_close(&reader);
         return 1;
     }
 
     while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
-        bdb_writer_append(&writer, chunk, &err);
+        status = bdb_writer_append(&writer, chunk, &err);
+        if (status != BDB_OK) break;
         print_chunk_cb(chunk, &err);
     }
-    if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
-    bdb_writer_finish(&writer, &err);
+    if (status == BDB_OK) {
+        status = bdb_writer_finish(&writer, &err);
+    }
+    if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
     bdb_writer_debug_dump(&writer, stdout);
 
