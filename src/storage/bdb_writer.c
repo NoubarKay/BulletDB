@@ -7,6 +7,7 @@
 
 #include "bdb_format.h"
 #include "memory.h"
+#include "io.h"
 
 BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
     *writer = (BDB_WRITER){0};
@@ -85,7 +86,7 @@ static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
       }
 
     for (uint64_t i=0; i < w->group.col_count; i++) {
-        size_t offset = _ftelli64(w->file);
+        size_t offset = (size_t)bdb_ftell(w->file);
         w->offsets[w->group_count * w->col_count + i] = offset;
         size_t col_type_size = bdb_col_type_size(w->group.columns[i].type);
 
@@ -184,8 +185,8 @@ BdbStatus bdb_writer_finish(BDB_WRITER *w, BdbError *err) {
         if (status != BDB_OK) return status;
     }
 
-    // The footer starts here. _ftelli64 is 64-bit, so this stays right past 2 GB
-    int64_t position = _ftelli64(w->file);
+    // footer position is a 64-bit offset so files larger than 2 GB are supported
+    int64_t position = (int64_t)bdb_ftell(w->file);
     if (position < 0) {
         return bdb_error_set(err, BDB_ERR_IO, "could not get footer position");
     }

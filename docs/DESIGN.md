@@ -102,7 +102,7 @@ All paths are under `src/`, which is the include root: code writes
 | Core | `core/chunk.c`, `core/table.c` | `COLUMN`, `CHUNK`, `TABLE`, types, `print_table`. `chunk.h` defines `BDB_VECTOR_SIZE` and `BDB_ROW_GROUP_SIZE` |
 | CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
 | Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → chunks again (footer loaded once, data streamed). `bdb_format.h` holds the magic, version and file limits |
-| Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump` |
+| Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c`, `storage/io.h` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump`. `io.h` also provides `bdb_fseek`, `bdb_ftell` (64-bit seek/tell, wrapping `_fseeki64`/`_ftelli64` on Windows and `fseeko`/`ftello` on POSIX) and `bdb_now` (monotonic nanosecond clock, wrapping `QueryPerformanceCounter` on Windows and `clock_gettime(CLOCK_MONOTONIC)` on POSIX) |
 | Executor | `executor/bdb_operator.h`, `executor/scan.c`, `executor/aggregate.c`, `executor/explain.c` | The operator tree that runs queries on chunks (Part 3) |
 
 ## Data model
@@ -561,7 +561,7 @@ void      bdb_writer_close (BDB_WRITER *w);
 |----------|------|
 | `open` | Zeroes the struct, opens the file and writes the header (`"BDB1"`, version). |
 | `append` | On the first chunk, copies the schema (names, types) into the group buffer and allocates it (`init_group`). Then `memcpy`s the chunk's values and bitmap onto the end of the buffer. When the buffer holds exactly `BDB_ROW_GROUP_SIZE` rows, writes the group. |
-| `write_group` (static) | Grows `group_rows` and `offsets` if they're full. For each column, records its offset with `_ftelli64` (64-bit, so offsets past 2 GB work), then writes its bitmap and values. Stores the group's row count, then increments `group_count`, and resets the buffer. |
+| `write_group` (static) | Grows `group_rows` and `offsets` if they're full. For each column, records its offset with `bdb_ftell` (64-bit, so offsets past 2 GB work), then writes its bitmap and values. Stores the group's row count, then increments `group_count`, and resets the buffer. |
 | `finish` | Writes the last, partial group if there is one. Records where the footer starts, writes the footer, then the trailer (that position plus `"BDB1"`), and flushes. Every write is checked. |
 | `close` | Frees the buffer and both arrays and closes the file. Safe to call after an error, and safe to call twice. It doesn't write anything, so a file closed without `finish` has no footer. |
 
@@ -723,8 +723,10 @@ Memory therefore doesn't depend on the file size: the footer is 8 bytes per
 column per group plus 4 per group, and the chunk buffer is about 18 KB per
 `INT` column.
 
-Seeks must be 64-bit (`_fseeki64` on Windows, `fseeko` elsewhere), because
-plain `fseek` takes a `long`, which is 32-bit on Windows.
+Seeks must be 64-bit because plain `fseek` takes a `long`, which is 32-bit on
+Windows. All seeks and tells go through `bdb_fseek` / `bdb_ftell` in
+`storage/io.h`, which map to `_fseeki64` / `_ftelli64` on Windows and
+`fseeko` / `ftello` on POSIX.
 
 **The round-trip test:** CSV → writer → `test-1.bdb` → reader, then compare
 with the CSV's chunks. Same row count (done: 225,721 rows in 111 chunks),
@@ -803,6 +805,10 @@ struct BdbOperator {
     void      (*close)(BdbOperator *self);
     void      (*describe)(BdbOperator *self, FILE *out);
     BdbOperator *child;
+    uint64_t    stat_calls;     // times bdb_op_next was called on this operator
+    uint64_t    stat_chunks;    // non-NULL chunks returned
+    uint64_t    stat_rows;      // total rows emitted
+    uint64_t    stat_time_ns;   // total wall time inside this operator's next(), in nanoseconds
 };
 ```
 
@@ -810,8 +816,14 @@ struct BdbOperator {
   data. The chunk belongs to the operator and is overwritten by the next call.
 - **`close`** frees the operator **and closes its child**, so closing the top
   operator closes the whole tree.
-- **`describe`** prints one line about the operator, for `bdb_explain`.
+- **`describe`** prints one line about the operator, for `bdb_explain`. After
+  execution it also prints the stat counters (see D2/D3 below).
 - **`child`** is the operator it pulls from, or `NULL` for a scan.
+
+Callers never call `op->next` directly. They call `bdb_op_next(op, &out, err)`,
+a static inline wrapper in `bdb_operator.h` that increments `stat_calls`,
+times the call with `bdb_now()`, and updates `stat_chunks`, `stat_rows` and
+`stat_time_ns` from the result.
 
 Each concrete operator is a struct that **embeds `BdbOperator` as its first
 field** and adds its own state. Because a struct's first field starts at the
@@ -849,7 +861,7 @@ include each other, which broke depending on include order.
 | `bdb_scan_open(scan, path, err)` | Zeroes the struct, sets the function pointers and `child = NULL`, then opens the reader. The pointers are set first, so `close` is safe even if opening fails. |
 | `scan_next` | Returns `bdb_reader_next_chunk` on its reader. |
 | `scan_close` | Closes the reader. |
-| `scan_describe` | `SCAN (225721 rows, 5 columns, 2 groups)` |
+| `scan_describe` | `SCAN (225721 rows, 5 columns, 2 groups)` before a run; after a run appends `calls: N  chunks: N  rows: N  time: N ms  (times next() was invoked \| non-empty chunks returned \| total rows emitted)` |
 
 ## Aggregate
 
@@ -1010,8 +1022,8 @@ The rest of the debugger is planned in steps:
 | Step | What | How |
 |------|------|-----|
 | D1 | Plan printer | `describe` + `bdb_explain` (**done**) |
-| D2 | Counts per operator: `next` calls, chunks and rows returned | One wrapper, `bdb_op_next(op, &out, err)`, that calls `op->next` and updates counters stored in the operator's base. **Every** `next` call goes through it (operators calling their child, and `main` calling the top), so no operator needs debugging code of its own. `bdb_explain` prints the counts after a run, like `EXPLAIN ANALYZE`. |
-| D3 | Time per operator | Timing inside the same wrapper, both including and excluding the time spent in children |
+| D2 | Counts per operator: `next` calls, chunks and rows returned | `bdb_op_next(op, &out, err)` wrapper increments `stat_calls`, `stat_chunks`, `stat_rows` in the operator's base on every call. Every `next` call goes through it. `bdb_explain` prints the counts after a run. (**done**) |
+| D3 | Time per operator | `bdb_op_next` also brackets the call with `bdb_now()` and accumulates `stat_time_ns`. Each `describe` prints total wall time in ms. For pipeline breakers (aggregate), `describe` subtracts the child's `stat_time_ns` to show self time only. (**done**) |
 | D4 | Tracing | The wrapper prints the first rows of each chunk leaving an operator that's marked for tracing |
 
 The idea behind the wrapper is the same as tracing in clox's `run()` loop:
@@ -1020,9 +1032,9 @@ scattered through every operator.
 
 ## Next steps
 
-**Step D2: per-operator counts** (next). The `bdb_op_next` wrapper described
-above, with counters for `next` calls, chunks and rows in each operator's
-base, printed by `bdb_explain` after a run.
+**Step D4: tracing** (next in the debugger). The `bdb_op_next` wrapper prints
+the first few rows of each chunk for operators marked for tracing, without
+touching any operator's own code.
 
 **Step 5: `FILTER`** (`WHERE column op value`), a streaming operator between
 the scan and the aggregate. For each chunk it keeps only the matching rows.

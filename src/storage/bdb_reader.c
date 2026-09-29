@@ -2,6 +2,7 @@
 
 #include "common/common.h"
 #include "bdb_reader.h"
+#include "io.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +18,10 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
     }
 
     int64_t file_size;
-    if (_fseeki64(reader->file, 0, SEEK_END) != 0) {
+    if (bdb_fseek(reader->file, 0, SEEK_END) != 0) {
         return bdb_error_set(err, BDB_ERR_IO, "could not seek to end of file '%s'", path);
     }
-    file_size = _ftelli64(reader->file);
+    file_size = bdb_ftell(reader->file);
     if (file_size < 20) {
         return bdb_error_set(err, BDB_ERR_FORMAT, "Invalid or corrupted file '%s'", path);
     }
@@ -43,7 +44,7 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
     }
 
     //footer check
-    fseek(reader->file, file_size - 12, SEEK_SET);
+    bdb_fseek(reader->file, file_size - 12, SEEK_SET);
     if (fread(&footer_offset, sizeof(uint64_t), 1, reader->file) != 1) {
         return bdb_error_set(err, BDB_ERR_FORMAT, "Invalid or corrupted file '%s': Footer offset not found.", path);
     }
@@ -53,7 +54,7 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
 
 
     //seek to footer offset and start reading footer data
-    fseek(reader->file, footer_offset, SEEK_SET);
+    bdb_fseek(reader->file, footer_offset, SEEK_SET);
     if (fread(&reader->row_count, sizeof(uint64_t), 1, reader->file) != 1){
         return bdb_error_set(err, BDB_ERR_FORMAT, "Invalid or corrupted file '%s': Footer row count not found.", path);
     }
@@ -147,13 +148,13 @@ BdbStatus bdb_reader_next_chunk(BDB_READER *reader, const CHUNK **out, BdbError 
         size_t   size = bdb_col_type_size(col->type);
 
         // bitmap: 1 byte per row, starting at this chunk's first row
-        if (_fseeki64(reader->file, (int64_t)(base + reader->rows_in_group), SEEK_SET) != 0 ||
+        if (bdb_fseek(reader->file, (int64_t)(base + reader->rows_in_group), SEEK_SET) != 0 ||
             fread(col->bitmap, 1, to_take, reader->file) != to_take) {
             return bdb_error_set(err, BDB_ERR_IO, "could not read bitmap of column '%s'", col->name);
         }
 
         // values: after the whole bitmap (n bytes), then this chunk's first row
-        if (_fseeki64(reader->file, (int64_t)(base + n + reader->rows_in_group * size), SEEK_SET) != 0 ||
+        if (bdb_fseek(reader->file, (int64_t)(base + n + reader->rows_in_group * size), SEEK_SET) != 0 ||
             fread(col->data, size, to_take, reader->file) != to_take) {
             return bdb_error_set(err, BDB_ERR_IO, "could not read values of column '%s'", col->name);
         }

@@ -81,18 +81,17 @@ int main(int argc, char *argv[]) {
 
 
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_aggregate_init(&agg, &scan.base, BDB_AGG_COUNT, "PRICEEACH");
-    BdbOperator *op = &agg.base;                 // main only talks to the top operator
+    bdb_aggregate_init(&agg, &scan.base, BDB_AGG_AVG, "price");
+    BdbOperator *op = &agg.base;
 
-
-    bdb_explain(op, stdout);
-
-
-    while (status == BDB_OK && (status = op->next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
-        print_chunk_cb(chunk, &err);             // prints the 1-row result table
+    while (status == BDB_OK && (status = bdb_op_next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
+        print_chunk_cb(chunk, &err);
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
     op->close(op);
+
+
+    bdb_explain(op, stdout);
 
 
     return status == BDB_OK ? 0 : 1;

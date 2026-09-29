@@ -1,6 +1,7 @@
 #include "bdb_operator.h"
 #include "executor/aggregate.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,15 +60,15 @@ static BdbStatus build_result(BdbAggregate *agg, BdbError *err) {
             break;
         case BDB_AGG_SUM:
             if (is_int) ((int64_t *)col->data)[0] = agg->int_sum;
-            else        ((double  *)col->data)[0] = agg->double_sum;
+            else ((double  *)col->data)[0] = agg->double_sum;
             break;
         case BDB_AGG_MIN:
             if (is_int) ((int64_t *)col->data)[0] = agg->int_min;
-            else        ((double  *)col->data)[0] = agg->double_min;
+            else ((double  *)col->data)[0] = agg->double_min;
             break;
         case BDB_AGG_MAX:
             if (is_int) ((int64_t *)col->data)[0] = agg->int_max;
-            else        ((double  *)col->data)[0] = agg->double_max;
+            else ((double  *)col->data)[0] = agg->double_max;
             break;
         case BDB_AGG_AVG: {
             double total = is_int ? (double)agg->int_sum : agg->double_sum;
@@ -92,7 +93,7 @@ static BdbStatus aggregate_next(BdbOperator *self, const CHUNK **out, BdbError *
     const CHUNK *chunk;
     BdbStatus status;
 
-    while ((status = self->child->next(self->child, &chunk, err)) == BDB_OK && chunk != NULL) {
+    while ((status = bdb_op_next(self->child, &chunk, err)) == BDB_OK && chunk != NULL) {
         if (agg->found_column == false) {
             for (int i = 0; i < chunk->col_count; i++) {
                 if (strcmp(chunk->columns[i].name, agg->column_name) == 0) {
@@ -155,7 +156,16 @@ static BdbStatus aggregate_next(BdbOperator *self, const CHUNK **out, BdbError *
 
 static void aggregate_describe(BdbOperator *self, FILE *out) {
     BdbAggregate *agg = (BdbAggregate *)self;
-    fprintf(out, "AGGREGATE %s(%s)\n", AGG_NAMES[agg->type], agg->column_name);
+    fprintf(out, "AGGREGATE %s(%s) ", AGG_NAMES[agg->type], agg->column_name);
+    if (self->stat_calls > 0) {
+        uint64_t child_ns = self->child ? self->child->stat_time_ns : 0;
+        uint64_t self_ns  = self->stat_time_ns > child_ns ? self->stat_time_ns - child_ns : 0;
+        fprintf(out, "calls: %" PRIu64 "  chunks: %" PRIu64 "  rows: %" PRIu64
+                "  time: %.3f ms"
+                "  (times next() was invoked | non-empty chunks returned | total rows emitted | self time excl. child)\n",
+                self->stat_calls, self->stat_chunks, self->stat_rows,
+                (double)self_ns / 1e6);
+    }
 }
 
 static void aggregate_close(BdbOperator *self) {
