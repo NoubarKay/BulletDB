@@ -3,6 +3,7 @@
 //
 #define _CRTDBG_MAP_ALLOC
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +12,10 @@
 #include "core/table.h"
 #include "csv/csv_reader.h"
 #include "common/common.h"
+#include "executor/aggregate.h"
+#include "executor/scan.h"
 #include "query/query.h"
+#include "storage/bdb_format.h"
 #include "storage/bdb_reader.h"
 #include "storage/bdb_writer.h"
 #include "storage/debug.h"
@@ -35,13 +39,15 @@ int main(int argc, char *argv[]) {
     BdbError err = {0};
     CSV_READER csvReader = {0};
     BDB_WRITER writer = {0};
-    BDB_READER reader = {0};
+    BdbScan scan;
+    BdbAggregate agg;
 
     const CHUNK *chunk;
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <file.csv>\n", argv[0]);
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "Usage: %s <file.csv> [column to SUM]\n", argv[0]);
         return 1;
     }
+
 
     BdbStatus status = csv_open(&csvReader, argv[1], &err);
 
@@ -72,28 +78,16 @@ int main(int argc, char *argv[]) {
     csv_close(&csvReader);
     bdb_writer_close(&writer);
 
-    status = bdb_reader_open(&reader, "test-1.bdb", &err);
-    if (status != BDB_OK) {
-        fprintf(stderr, "error: %s\n", err.message);
+    status = bdb_scan_open(&scan, "test-1.bdb", &err);
+    bdb_aggregate_init(&agg, &scan.base, "PRICEEACH");
+    BdbOperator *op = &agg.base;                 // main only talks to the top operator
+
+    while (status == BDB_OK && (status = op->next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
+        print_chunk_cb(chunk, &err);             // prints the 1-row result table
     }
+    if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
+    op->close(op);
 
-
-    if (status == BDB_OK) {
-        uint64_t chunks_read = 0;
-        uint64_t rows_read = 0;
-
-        while ((status = bdb_reader_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
-            chunks_read++;
-            rows_read += chunk->count;
-            // print_chunk_cb(chunk, &err);   // uncomment to see each chunk's rows
-        }
-        if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
-
-        printf("\nreader streamed %" PRIu64 " chunks, %" PRIu64 " rows (footer says %" PRIu64 ")\n",
-               chunks_read, rows_read, reader.row_count);
-    }
-
-    bdb_reader_close(&reader);
 
     return status == BDB_OK ? 0 : 1;
 

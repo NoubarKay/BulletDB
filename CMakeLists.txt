@@ -20,6 +20,11 @@ add_executable(BulletDB
         src/storage/debug.c
         src/storage/bdb_reader.h
         src/storage/bdb_reader.c
+        src/executor/bdb_operator.h
+        src/executor/scan.h
+        src/executor/scan.c
+        src/executor/aggregate.h
+        src/executor/aggregate.c
 )
 
 # Include paths are relative to src/, e.g. #include "core/chunk.h"
