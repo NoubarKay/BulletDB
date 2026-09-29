@@ -11,8 +11,9 @@ and keeps scan loops tight.
 > **Status:** early work in progress. BulletDB streams a CSV as **chunks** of
 > up to 2048 typed rows (INT, DOUBLE, BOOL, with NULLs) and writes them to its
 > own columnar **`.bdb` v1** file: row groups of column blocks, then a footer
-> with the schema and the offset of every block. The **reader** for that
-> format and the **query engine** are next. See [Current work](#current-work).
+> with the schema and the offset of every block. The **reader** can open a
+> `.bdb` file and load its footer; streaming the data back out, and the
+> **query engine**, are next. See [Current work](#current-work).
 
 For how the engine is built and why, and for the full `.bdb` v1
 specification, see **[docs/DESIGN.md](docs/DESIGN.md)**.
@@ -58,8 +59,15 @@ BulletDB <file.csv>
 ```
 
 BulletDB reads the CSV one chunk at a time, prints each chunk as a table, and
-writes all of them to **`test-1.bdb`** in the current directory. At the end it
-prints a summary of the file it wrote (`bdb_writer_debug_dump`).
+writes all of them to **`test-1.bdb`** in the current directory. Then it:
+
+1. prints a summary of the file it wrote (`bdb_writer_debug_dump`),
+2. opens `test-1.bdb` again with the reader, and
+3. prints what the reader loaded from the file's footer
+   (`bdb_reader_debug_dump`), with a count of problems found.
+
+The two summaries should match line for line. If they do, the file was
+written and read back consistently.
 
 Each chunk is printed like this:
 
@@ -81,21 +89,33 @@ A chunk holds up to `BDB_VECTOR_SIZE` rows (2048, set in
 several chunks from a small CSV, lower `BDB_VECTOR_SIZE` to something like
 10.
 
-The summary at the end looks like this (160,000 rows, 5 columns):
+The two summaries at the end look like this (225,721 rows, 5 columns):
 
 ```text
 == BDB_WRITER ==
-rows written: 160000   columns: 5   groups: 2 (capacity 8)   rows in buffer: 0
+rows written: 225721   columns: 5   groups: 2 (capacity 8)   rows in buffer: 0
   col 0: ORDERNUMBER          type 0, 8 bytes per value
   ...
   group 0: 122880 rows
     ORDERNUMBER          offset          8 (0x00000008)  size    1105920  ok
-    QUANTITYORDERED      offset    1105928 (0x0010E008)  size    1105920  ok
     ...
-  group 1: 37120 rows
+  group 1: 102841 rows
+    ORDERNUMBER          offset    5529608 (0x00546008)  size     925569  ok
     ...
-  data ends at 7200008 (footer should start here)
+  data ends at 10157453 (footer should start here)
+== BDB_READER ==
+rows: 225721   columns: 5   groups: 2
+  col 0: ORDERNUMBER          INT     (type 0)
+  ...
+  group 0: 122880 rows
+    ORDERNUMBER          offset          8 (0x00000008)  size    1105920  ok
+    ...
+  data ends at 10157453 (should equal the trailer's footer_offset)
+== 0 problems ==
 ```
+
+Any inconsistency in the reader's view of the file is printed as a line
+starting with `!!`.
 
 To look at the bytes themselves: `Format-Hex test-1.bdb` in PowerShell.
 
@@ -424,7 +444,8 @@ BulletDB/
         ├── bdb_writer.c / .h    BDB_WRITER: open, append, finish, close
         ├── memory.c / .h        GROW_CAPACITY / GROW_ARRAY (growing arrays by doubling)
         ├── io.c / .h            checked read helper
-        └── debug.c / .h         bdb_writer_debug_dump
+        ├── bdb_reader.c / .h    BDB_READER: open (footer loaded); next_chunk and close to come
+        └── debug.c / .h         bdb_writer_debug_dump, bdb_reader_debug_dump
 ```
 
 ## Current work
@@ -446,9 +467,15 @@ chunks through the engine."
        copies chunks into a row group buffer, writes each full group, then the
        last partial group, the footer and the trailer. Checked byte by byte on
        a 1-row file (193 bytes) and with 160,000 rows (2 groups)
-7. [ ] **`BDB_READER`** for the new format, with the same shape as
+7. [~] **`BDB_READER`** for the new format, with the same shape as
        `CSV_READER` (`open` / `next_chunk` / `close`). It keeps only the header
-       and footer in memory and streams the data one chunk at a time
+       and footer in memory and streams the data one chunk at a time.
+       - [x] `bdb_reader_open`: header, trailer and footer (schema, group row
+             counts, every block's offset). Checked with
+             `bdb_reader_debug_dump`: 0 problems, and identical to the
+             writer's dump on a 225,721-row, 2-group file
+       - [ ] `bdb_reader_close`
+       - [ ] `bdb_reader_next_chunk`: stream the data
 8. [ ] **Round trip:** CSV → `.bdb` → reader gives back the same rows
 9. [ ] **`SUM`** over a column, pulling chunks from `BDB_READER`, skipping
        NULLs
@@ -492,14 +519,18 @@ don't read much into the first chunk or a single slow chunk.
   is stored wrongly instead of being rejected. For example, `abc` in an `INT`
   column becomes `0`.
 - **No strings yet.** A `STR` column fails the import.
-- **No reading back or queries yet.** `.bdb` files can be written but not
-  read until `BDB_READER` exists.
+- **No reading data back or queries yet.** The reader can open a `.bdb` file
+  and load its footer, but it can't stream the values out until
+  `bdb_reader_next_chunk` exists.
 - **CSV:** quoted fields and commas inside values aren't supported.
 - **Fixed output file.** `main` always writes `test-1.bdb`.
 - **File format:** little-endian only. No per-group statistics or compression
   yet (planned for later versions).
-- **Windows only for now:** the writer uses `_ftelli64`, which doesn't exist on
-  Linux or macOS (`ftello` there).
+- **Windows only for now:** the writer and reader use `_ftelli64` and
+  `_fseeki64`, which don't exist on Linux or macOS (`ftello` / `fseeko` there).
+- **Blocks aren't aligned.** Values can start at odd byte offsets in the file.
+  That's fine for `fread`, but reading values in place from a memory-mapped
+  file would need blocks padded to 8 bytes (planned for format v2).
 
 ## Known bugs
 
@@ -513,14 +544,27 @@ Things that are broken right now, most serious first.
       columns: the writer only learns the schema from the first chunk
 - [ ] `bdb_write_group` doesn't check `_ftelli64` for failure (-1) before
       storing it as an offset
+- [ ] `bdb_reader_open` allocates `chunk.columns` with
+      `realloc(..., sizeof(COLUMN) * (uint16_t)(&reader->chunk.col_count + 1))`,
+      which uses the field's **address** instead of its value, so the size is
+      effectively random. It should be `calloc(col_count, sizeof(COLUMN))`
+- [ ] `bdb_reader_open` doesn't yet reject a bad `footer_offset`, a
+      `col_count` outside 1..100, bad group row counts, or a footer that
+      doesn't end at the trailer (these are only checked by
+      `bdb_reader_debug_dump`)
+- [ ] `bdb_reader_open` uses plain `fseek` (32-bit on Windows) in two places,
+      and doesn't check the `name_len` read or the `malloc` results
 
 **Memory**
+- [ ] There's no `bdb_reader_close`, so the reader's file, column names and
+      footer arrays are never freed, including on every error path
 - [ ] `free_table` doesn't free `bitmap`
 - [ ] If `csv_open` fails, `main` returns without calling `csv_close`, so the
       file and buffer leak
 
 **Cleanup**
-- [ ] `chunk_init` takes a `col_count` and an `err` that it doesn't need
+- [ ] `chunk_init` takes a `col_count` it doesn't need (it's set again by the
+      caller)
 - [ ] The `memcpy` in `bdb_writer_append` adds an offset to a `void *`. GCC
       allows this as an extension, but standard C needs a `(char *)` cast
 - [ ] `parse_header` still splits with `strtok`, so column names aren't
@@ -536,6 +580,7 @@ Things that are broken right now, most serious first.
 - [x] Bordered table printer
 - [x] Columnar `.bdb` v1 file writer: typed column blocks with NULL bitmaps,
       row groups, and a footer with the schema and every block's offset
+- [x] `.bdb` reader, part 1: opens a file and loads its footer
 - [x] Save and load tables in `.bdb`, with row groups (old int64 format, since
       replaced)
 - [x] `SUM` over a column, with single-condition filters (old int64 engine)

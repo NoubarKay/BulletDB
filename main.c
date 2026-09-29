@@ -12,6 +12,7 @@
 #include "csv/csv_reader.h"
 #include "common/common.h"
 #include "query/query.h"
+#include "storage/bdb_reader.h"
 #include "storage/bdb_writer.h"
 #include "storage/debug.h"
 
@@ -32,8 +33,9 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
 
 int main(int argc, char *argv[]) {
     BdbError err = {0};
-    CSV_READER reader = {0};
+    CSV_READER csvReader = {0};
     BDB_WRITER writer = {0};
+    BDB_READER reader = {0};
 
     const CHUNK *chunk;
     if (argc != 2) {
@@ -41,7 +43,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    BdbStatus status = csv_open(&reader, argv[1], &err);
+    BdbStatus status = csv_open(&csvReader, argv[1], &err);
 
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n", err.message);
@@ -52,11 +54,11 @@ int main(int argc, char *argv[]) {
 
     if (status != BDB_OK) {
         fprintf(stderr, "error: %s\n", err.message);
-        csv_close(&reader);
+        csv_close(&csvReader);
         return 1;
     }
 
-    while ((status = csv_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
+    while ((status = csv_next_chunk(&csvReader, &chunk, &err)) == BDB_OK && chunk != NULL) {
         status = bdb_writer_append(&writer, chunk, &err);
         if (status != BDB_OK) break;
         print_chunk_cb(chunk, &err);
@@ -69,8 +71,16 @@ int main(int argc, char *argv[]) {
 
     bdb_writer_debug_dump(&writer, stdout);
 
-    csv_close(&reader);
+    csv_close(&csvReader);
     bdb_writer_close(&writer);
+
+    status = bdb_reader_open(&reader, "test-1.bdb", &err);
+    if (status != BDB_OK) {
+        fprintf(stderr, "error: %s\n", err.message);
+    }
+
+    bdb_reader_debug_dump(&reader, stdout);
+
     return status == BDB_OK ? 0 : 1;
 
 

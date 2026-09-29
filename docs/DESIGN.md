@@ -7,7 +7,8 @@ format with its writer and reader.
   the CSV side.
 - Part 2, [.bdb v1](#part-2-bdb-v1-file-format), covers the file format. The
   **writer is built** and produces files that match the spec byte for byte.
-  The **reader is designed but not built yet.**
+  The **reader is half built**: `bdb_reader_open` loads and checks the header,
+  trailer and footer (milestone 1). Streaming the data (`next_chunk`) is next.
 
 The README covers building, usage and the list of known bugs. This document
 covers the structure of the engine and the reasons behind it.
@@ -88,8 +89,8 @@ All paths are under `src/`, which is the include root: code writes
 | Common | `common/common.c` | `BdbStatus`, `BdbError` |
 | Core | `core/chunk.c`, `core/table.c` | `COLUMN`, `CHUNK`, `TABLE`, types, `print_table`. `chunk.h` defines `BDB_VECTOR_SIZE` and `BDB_ROW_GROUP_SIZE` |
 | CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
-| Storage | `storage/bdb_writer.c`, `storage/bdb_format.h` | Chunks → `.bdb` file. `bdb_format.h` holds the magic, version and file limits |
-| Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` |
+| Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → footer (data streaming next). `bdb_format.h` holds the magic, version and file limits |
+| Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump` |
 | Query | `query/query.c` | Old int64 query engine, switched off |
 
 ## Data model
@@ -494,8 +495,28 @@ The reader rejects a file with `BDB_ERR_FORMAT` when any of these are true:
 - The group `row_count`s don't add up to the total `row_count`.
 - A block, from its offset plus its computed size, would extend past the
   footer.
+- The footer doesn't end exactly where the trailer starts (`file_size − 12`).
+  This catches any field read with the wrong size, because every later read
+  would be shifted.
 
 A read that ends early fails with `BDB_ERR_IO`.
+
+**What's implemented today:**
+
+| Check | Done in |
+|-------|---------|
+| File at least 20 bytes | `bdb_reader_open` |
+| Header magic and version | `bdb_reader_open` |
+| Trailer magic | `bdb_reader_open` |
+| Column types are known | `bdb_reader_open` |
+| `col_count` within 1..100 | `bdb_reader_debug_dump` only |
+| Group row counts within 1..`BDB_ROW_GROUP_SIZE`, and adding up to `row_count` | `bdb_reader_debug_dump` only |
+| Blocks contiguous (each starts where the previous ended) | `bdb_reader_debug_dump` only |
+| `footer_offset` inside the file | not yet |
+| Footer ends at `file_size − 12` | not yet |
+
+The checks that are only in the dump still need to move into
+`bdb_reader_open`, so a bad file is rejected even when no dump is called.
 
 ## Writer
 
@@ -572,21 +593,58 @@ and the header's names are lost.
 
 ## Reader
 
-The reader is a **source**, with the same shape as `CSV_READER`:
+The reader is a **source**, with the same shape as `CSV_READER`.
+
+| Milestone | What | Status |
+|-----------|------|--------|
+| M1 | `bdb_reader_open`: header, trailer and footer loaded and checked | **Done**, verified with `bdb_reader_debug_dump` |
+| M2 | `bdb_reader_next_chunk`: stream the data one chunk at a time | Next |
+| M3 | Round trip (CSV → `.bdb` → reader gives the same rows), then `SUM` | After M2 |
 
 ```c
 typedef struct {
-    FILE    *file;
-    /* footer contents: row_count, schema, group_rows, offsets */
-    uint32_t group;          // current group
-    uint32_t row_in_group;   // next row to read in it
-    CHUNK    chunk;          // reused, capacity BDB_VECTOR_SIZE
+    FILE      *file;
+
+    // From the footer (the only metadata held in memory):
+    uint64_t   row_count;
+    uint16_t   col_count;
+    uint32_t   group_count;
+    uint32_t  *row_groups;    // [group_count]            rows in each group
+    uint64_t  *offsets;       // [group_count * col_count] offset of each column block
+
+    // Schema (names, types in chunk.columns); later also the buffers for
+    // BDB_VECTOR_SIZE rows, reused by next_chunk:
+    CHUNK      chunk;
+
+    // Planned for M2:
+    // uint32_t group;          current group
+    // uint32_t row_in_group;   next row to read in it
 } BDB_READER;
 
-BdbStatus bdb_reader_open      (BDB_READER *r, const char *path, BdbError *err);
-BdbStatus bdb_reader_next_chunk(BDB_READER *r, const CHUNK **out, BdbError *err);
-void      bdb_reader_close     (BDB_READER *r);
+BdbStatus bdb_reader_open      (BDB_READER *r, const char *path, BdbError *err);  // done
+BdbStatus bdb_reader_next_chunk(BDB_READER *r, const CHUNK **out, BdbError *err); // M2
+void      bdb_reader_close     (BDB_READER *r);                                   // to add
 ```
+
+**How `open` reads the footer.** It seeks to `footer_offset`, reads
+`row_count` and `col_count`, allocates `chunk.columns`, then reads each
+column's name (into a `malloc`ed buffer with a `'\0'` added, since the file
+doesn't store one) and type (read into a `uint8_t`, checked, then assigned to
+the enum). Then it reads `group_count` and, for each group, its row count
+followed by its `col_count` offsets in one `fread`.
+
+Every field is read with its exact on-disk size. Reading one field with the
+wrong size shifts every read after it. That happened twice while building
+this: `group_count` read as 2 bytes instead of 4 made the first group's row
+count come out as 65,536, and reading the row count twice made it 8. Using
+`sizeof(the_field)` instead of `sizeof(some_type)` prevents this.
+
+**Debugging.** `bdb_reader_debug_dump` in `storage/debug.c` prints what
+`open` loaded, in the same layout as the writer's dump, and checks it
+(column count, types, group row counts and their total, contiguous blocks).
+Problems are printed with `!!`, and it returns how many it found. Checked so
+far: the 193-byte example gives 0 problems, and a 225,721-row file (2 groups)
+gives a dump identical to the writer's.
 
 **Only the header and footer are held in memory.** Row groups are never
 loaded whole: data is streamed one chunk at a time.
@@ -653,3 +711,14 @@ Roughly in order, once v1 works end to end:
    sizes then go into the footer.
 7. **Vectorized execution:** filter and aggregate loops over whole chunks,
    written so the compiler can use SIMD.
+8. **Aligned blocks.** Blocks are currently packed back to back, so values
+   often start at odd offsets (for example 7,380,746 + 102,841 for a `DOUBLE`
+   block). That's fine with `fread`, which copies into aligned buffers, but
+   memory-mapping the file and reading values in place needs each block padded
+   to a multiple of 8 (or 64) bytes, as Parquet and Arrow do. This is a
+   format change, so it belongs in v2.
+9. **Narrower integer types** (`INT8`, `INT16`, `INT32`) when the schema is
+   known in advance (for example from a SQL source), and automatic
+   per-group bit widths (frame-of-reference and bit-packing) as part of
+   compression. Today every integer takes 8 bytes, which is why a `.bdb` file
+   is about 1.9 times the size of the CSV it came from.

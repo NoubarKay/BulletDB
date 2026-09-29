@@ -20,7 +20,7 @@ typedef struct {
     COLUMN *columns; //Array of columns in the chunk;
 } CHUNK;
 
-BdbStatus chunk_init(CHUNK *c, uint64_t col_count, BdbError *err);
+BdbStatus chunk_init(CHUNK *c, uint64_t col_count);
 void chunk_reset(CHUNK* c);
 void chunk_free(CHUNK* c);
 

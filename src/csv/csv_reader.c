@@ -175,7 +175,7 @@ BdbStatus csv_open(CSV_READER *reader, const char *path, BdbError *err) {
 
     reader->chunk = chunk;
 
-    chunk_init(&reader->chunk, 0, err);
+    chunk_init(&reader->chunk, 0);
     BdbStatus status = BDB_OK;
 
     char* dest = NULL;
