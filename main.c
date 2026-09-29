@@ -14,7 +14,7 @@
 #include "common/common.h"
 #include "executor/aggregate.h"
 #include "executor/scan.h"
-#include "query/query.h"
+#include "executor/explain.h"
 #include "storage/bdb_format.h"
 #include "storage/bdb_reader.h"
 #include "storage/bdb_writer.h"
@@ -78,9 +78,15 @@ int main(int argc, char *argv[]) {
     csv_close(&csvReader);
     bdb_writer_close(&writer);
 
+
+
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_aggregate_init(&agg, &scan.base, "PRICEEACH");
+    bdb_aggregate_init(&agg, &scan.base, BDB_AGG_COUNT, "PRICEEACH");
     BdbOperator *op = &agg.base;                 // main only talks to the top operator
+
+
+    bdb_explain(op, stdout);
+
 
     while (status == BDB_OK && (status = op->next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
         print_chunk_cb(chunk, &err);             // prints the 1-row result table

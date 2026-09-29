@@ -1,16 +1,17 @@
 # BulletDB design
 
-This document describes how BulletDB is built today, and the `.bdb` v1 file
-format with its writer and reader.
+This document describes how BulletDB is built today: the data model, the
+`.bdb` v1 file format with its writer and reader, and the query executor.
 
 - Part 1, [Current design](#part-1-current-design), covers the data model and
   the CSV side.
 - Part 2, [.bdb v1](#part-2-bdb-v1-file-format), covers the file format. The
-  **writer is built** and produces files that match the spec byte for byte.
-  The **reader is built**: it loads and checks the footer, then streams the
-  data back one chunk at a time. **Milestone: the storage round trip (CSV →
-  `.bdb` → chunks) works.** Checking the values end to end, and the first
-  query (`SUM`), are next.
+  **writer and reader are built**, and the storage round trip (CSV → `.bdb` →
+  chunks) gives back every value exactly.
+- Part 3, [Query execution](#part-3-query-execution), covers the executor: a
+  tree of operators passing chunks to each other. **`SCAN` and `AGGREGATE`
+  (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`) work**, together with a plan printer.
+  Per-operator statistics and `FILTER` are next.
 
 The README covers building, usage and the list of known bugs. This document
 covers the structure of the engine and the reasons behind it.
@@ -38,6 +39,15 @@ covers the structure of the engine and the reasons behind it.
   - [Writer](#writer)
   - [Reader](#reader)
   - [Decisions](#decisions)
+- [Part 3: Query execution](#part-3-query-execution)
+  - [The model: Volcano with vectors](#the-model-volcano-with-vectors)
+  - [The base operator](#the-base-operator)
+  - [Scan](#scan)
+  - [Aggregate](#aggregate)
+  - [Streaming operators and pipeline breakers](#streaming-operators-and-pipeline-breakers)
+  - [Explain and the execution debugger](#explain-and-the-execution-debugger)
+  - [Next steps](#next-steps)
+  - [Execution decisions](#execution-decisions)
 - [Later](#later)
 
 ---
@@ -93,7 +103,7 @@ All paths are under `src/`, which is the include root: code writes
 | CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
 | Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → chunks again (footer loaded once, data streamed). `bdb_format.h` holds the magic, version and file limits |
 | Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump` |
-| Query | `query/query.c` | Old int64 query engine, switched off |
+| Executor | `executor/bdb_operator.h`, `executor/scan.c`, `executor/aggregate.c`, `executor/explain.c` | The operator tree that runs queries on chunks (Part 3) |
 
 ## Data model
 
@@ -301,16 +311,15 @@ errors.
 ## What's switched off
 
 The first version of BulletDB loaded the whole CSV into one `TABLE` of
-`int64_t` columns, then wrote it to `.bdb`, read it back and ran a query. The
-old writer and reader have been deleted (the new writer in Part 2 replaces
-them, and git history keeps them). One part is still in the tree but not
-called:
+`int64_t` columns, then wrote it to `.bdb`, read it back and ran a query.
+All of that has since been replaced and deleted (git history keeps it):
 
-| Part | File | State |
-|------|------|-------|
-| Query engine | `query/query.c` | int64 only, takes a `TABLE`, scan loop commented out |
+| Old part | Replaced by |
+|----------|-------------|
+| int64 `.bdb` writer and reader | `BDB_WRITER` and `BDB_READER` (Part 2) |
+| `query/query.c` (`bdb_run_query` on a `TABLE`) | the executor (Part 3) |
 
-It gets ported to chunks once the new reader exists.
+`TABLE` itself remains only as a view for `print_table`.
 
 ---
 
@@ -755,12 +764,296 @@ That's the payoff of the columnar layout.
 
 ---
 
+# Part 3: Query execution
+
+## The model: Volcano with vectors
+
+A query runs as a **tree of operators**. Each operator has a `next` function
+that the operator above it calls to get data; each operator gets its own
+input by calling `next` on its **child**. This is the Volcano (iterator)
+model (Graefe, 1994).
+
+Classic Volcano returns **one row** per `next`. BulletDB returns **one chunk
+of up to 2048 rows**, which is vectorized execution (MonetDB/X100, Boncz et
+al., 2005; also DuckDB). The difference matters for speed: with one row per
+call, every row pays for a function call through a pointer in every
+operator, plus a type check, a few nanoseconds each. A `SUM` loop over a
+chunk costs about 0.45 ns per row. With chunks, those costs are paid once per
+2048 rows, and the work inside is a plain loop over an array.
+
+The analogy with Crafting Interpreters: the operator tree is like an AST, and
+running it is like a tree-walking interpreter. Tuple-at-a-time is jlox
+(paying the tree-walking cost for every row); vectorized execution keeps the
+tree but does a whole batch per node visit; compiled engines (HyPer) are the
+clox approach, turning the query into code.
+
+The model is **pull-based**, the same as the CSV and `.bdb` readers: the
+caller asks for the next chunk. (DuckDB later moved to push-based execution,
+mainly to parallelize better. That only matters once there are threads.)
+
+## The base operator
+
+`executor/bdb_operator.h`:
+
+```c
+typedef struct BdbOperator BdbOperator;
+
+struct BdbOperator {
+    BdbStatus (*next)(BdbOperator *self, const CHUNK **out, BdbError *err);
+    void      (*close)(BdbOperator *self);
+    void      (*describe)(BdbOperator *self, FILE *out);
+    BdbOperator *child;
+};
+```
+
+- **`next`** sets `*out` to the next chunk, or to `NULL` when there is no more
+  data. The chunk belongs to the operator and is overwritten by the next call.
+- **`close`** frees the operator **and closes its child**, so closing the top
+  operator closes the whole tree.
+- **`describe`** prints one line about the operator, for `bdb_explain`.
+- **`child`** is the operator it pulls from, or `NULL` for a scan.
+
+Each concrete operator is a struct that **embeds `BdbOperator` as its first
+field** and adds its own state. Because a struct's first field starts at the
+struct's own address, a pointer to the operator and a pointer to its `base`
+are the same address. This is how C does inheritance, the same trick as `Obj`
+at the start of every object in clox:
+
+```c
+typedef struct {
+    BdbOperator base;     // must be first
+    BDB_READER  reader;   // this operator's own state
+} BdbScan;
+```
+
+- **Upcast** (operator → base), done by callers: `&scan.base`. No cast needed.
+- **Downcast** (base → operator), done inside the operator's own functions:
+  `BdbScan *scan = (BdbScan *)self;`.
+
+Each operator's constructor sets the function pointers to its own static
+functions (`scan->base.next = scan_next;`). After that, anyone calling
+`op->next(op, ...)` ends up in the right function without knowing what kind
+of operator it is (dynamic dispatch, like a virtual method). The functions
+themselves are `static`: they're only reached through the pointers.
+
+**Include direction:** operator headers include `bdb_operator.h`; the base
+header never includes any operator. An early version had the two headers
+include each other, which broke depending on include order.
+
+## Scan
+
+`executor/scan.c`. The bottom of every tree. It **owns** a `BDB_READER`:
+
+| Function | Does |
+|----------|------|
+| `bdb_scan_open(scan, path, err)` | Zeroes the struct, sets the function pointers and `child = NULL`, then opens the reader. The pointers are set first, so `close` is safe even if opening fails. |
+| `scan_next` | Returns `bdb_reader_next_chunk` on its reader. |
+| `scan_close` | Closes the reader. |
+| `scan_describe` | `SCAN (225721 rows, 5 columns, 2 groups)` |
+
+## Aggregate
+
+`executor/aggregate.c`. Computes one aggregate of one column over everything
+its child produces.
+
+| Aggregate | Keeps | Result | Result type | No non-NULL values |
+|-----------|-------|--------|-------------|--------------------|
+| `SUM` | running total | total | the column's type | NULL |
+| `COUNT` | number of non-NULL values | count | INT | 0 |
+| `MIN` | smallest value so far | min | the column's type | NULL |
+| `MAX` | largest value so far | max | the column's type | NULL |
+| `AVG` | total and count | total ÷ count | DOUBLE | NULL |
+
+```c
+typedef enum { BDB_AGG_SUM, BDB_AGG_COUNT, BDB_AGG_MIN, BDB_AGG_MAX, BDB_AGG_AVG } BdbAggregateType;
+
+typedef struct {
+    BdbOperator      base;
+    const char      *column_name;   // e.g. "PRICEEACH"
+    uint64_t         column;        // its index, found in the first chunk
+    bool             found_column;
+    BdbAggregateType type;          // which aggregate (SUM, COUNT, ...)
+
+    enum ColumnType  col_type;      // the column's type
+    int64_t          int_sum;       // INT columns: exact integer total
+    double           double_sum;    // DOUBLE columns
+    uint64_t         count;         // non-NULL values seen
+    bool             has_value;     // has the first value been seen? (MIN/MAX)
+    int64_t          int_min,    int_max;
+    double           double_min, double_max;
+
+    bool             done;          // result already returned?
+    CHUNK            result;        // 1 column × 1 row
+} BdbAggregate;
+
+void bdb_aggregate_init(BdbAggregate *agg, BdbOperator *child,
+                        BdbAggregateType type, const char *column_name);
+```
+
+`next` does this:
+
+```
+*out = NULL
+done ?                                    → return OK (the result was already given)
+
+loop: chunk = child->next()
+    error?                                → return it
+    NULL?                                 → stop (the child is finished)
+    first chunk: find the column by name  → BDB_ERR_NOT_FOUND if it's not there
+    switch on the COLUMN type (once per chunk):
+        cast data to int64_t* or double*
+        for every row whose bitmap byte is 1:
+            count++, sum += v
+            first value ever?  → min = max = v
+            otherwise          → update min and max
+
+build the result (switch on the AGGREGATE type)
+done = true
+*out = &result
+```
+
+**The loop doesn't depend on which aggregate was asked for.** It updates
+count, sum, min and max together, for every kind. Only `build_result` looks
+at the aggregate type, to decide what to report. That keeps two separate
+questions in two separate places:
+
+| Where | Depends on | Decides |
+|-------|------------|---------|
+| the loop | the **column** type | how to read the values (`int64_t *` or `double *`) |
+| `build_result` | the **aggregate** type | which total to report, and its result type |
+
+It costs a few extra comparisons per row compared with one specialized loop
+per aggregate, and means adding an aggregate needs no change to the loop.
+(An early version switched on the aggregate type inside the loop and on the
+column type inside that, which grew a new nested branch for every aggregate.)
+
+`build_result`:
+
+```
+result type:  COUNT → INT,  AVG → DOUBLE,  otherwise the column's type
+allocate:     1 COLUMN, named "<AGG>(<column>)" from the AGG_NAMES table
+no values and not COUNT?          → bitmap[0] = 0 (NULL), done
+switch on the aggregate type      → write the one value, cast to int64_t* or double*
+bitmap[0] = 1
+```
+
+C can't choose a pointer type at run time, so each case writes through a
+cast it knows in advance (`is_int ? int_min : double_min`, and so on). AVG
+converts the total to `double` before dividing, so the average of an INT
+column isn't cut to a whole number.
+
+Details worth noting:
+- **The column is found by name in the first chunk it receives,** not in a
+  schema. The aggregate only knows it has *some* child operator, and
+  `BdbOperator` has no schema, but every chunk carries its column names. So
+  this works whatever sits below it.
+- **`data` is a `void *`**, because a column's type is only known at run
+  time. The loop casts it to `int64_t *` or `double *` once per chunk, based
+  on the column's type, and the `switch` is also once per chunk, never once
+  per row.
+- **INT columns are summed into an `int64_t`**, so the result is exact. A
+  `double` would lose precision above about 9 × 10¹⁵.
+- **The first non-NULL value becomes both min and max,** without comparing
+  (tracked by `has_value`). Starting `min` at 0 would be wrong: if every value
+  is above 0, the minimum would come out as 0, a value that isn't in the data.
+- **NULLs are skipped by every aggregate.** With no non-NULL values at all,
+  `COUNT` is 0 and the others are NULL (`bitmap[0] = 0`), as in SQL.
+- **Keep the two types apart.** An early version compared the aggregate type
+  with column-type constants. It passed by accident because `BDB_AGG_SUM` and
+  `BDB_AGG_COUNT` happen to have the same numbers (0 and 1) as `BDB_COL_INT`
+  and `BDB_COL_DOUBLE`, and failed as soon as `MIN` (2) was added. The field
+  holding the aggregate type is still named `type`; `kind` would make the
+  difference from `col_type` clearer.
+- **The result is an ordinary `CHUNK`,** so it prints with `print_table` and
+  could be consumed by another operator. Its memory is allocated with
+  `calloc` and freed by `chunk_free` in `close`.
+- **`done` is a separate idea from "the child is finished".** The child being
+  finished (its `next` returns `NULL`) ends the pulling loop. `done` remembers
+  that the result has been returned, so the *second* call to the aggregate's
+  `next` returns `NULL` instead of pulling again and producing a second result.
+
+Verified: `SUM` of every column of the 225,721-row test file matches the sums
+computed directly from the CSV, and `COUNT`, `MIN`, `MAX`, `AVG` and the NULL
+cases were checked by hand.
+
+## Streaming operators and pipeline breakers
+
+Operators fall into two groups:
+
+| Kind | Examples | Behaviour of `next` |
+|------|----------|---------------------|
+| **Streaming** | scan, filter, projection | handles each chunk as it arrives and passes it up straight away |
+| **Pipeline breaker** | aggregate, sort, hash-join build | must see **all** its input first: pulls from its child until `NULL`, then returns results |
+
+A chain of streaming operators ending at a breaker is a **pipeline**. Today's
+queries are a single pipeline (scan → aggregate). A sort or join would split
+a query into several. The order of operators is fixed by the tree's shape,
+which is built before running; at run time each operator only knows its
+child.
+
+## Explain and the execution debugger
+
+`executor/explain.c`: `bdb_explain(op, out)` walks down the `child` pointers
+and prints each operator's `describe` line, indented by depth, like SQL's
+`EXPLAIN`:
+
+```
+AGGREGATE SUM(PRICEEACH)
+        +-SCAN (225721 rows, 5 columns, 2 groups)
+```
+
+It only uses `describe` and `child`, so it works for any operator, including
+ones not written yet.
+
+The rest of the debugger is planned in steps:
+
+| Step | What | How |
+|------|------|-----|
+| D1 | Plan printer | `describe` + `bdb_explain` (**done**) |
+| D2 | Counts per operator: `next` calls, chunks and rows returned | One wrapper, `bdb_op_next(op, &out, err)`, that calls `op->next` and updates counters stored in the operator's base. **Every** `next` call goes through it (operators calling their child, and `main` calling the top), so no operator needs debugging code of its own. `bdb_explain` prints the counts after a run, like `EXPLAIN ANALYZE`. |
+| D3 | Time per operator | Timing inside the same wrapper, both including and excluding the time spent in children |
+| D4 | Tracing | The wrapper prints the first rows of each chunk leaving an operator that's marked for tracing |
+
+The idea behind the wrapper is the same as tracing in clox's `run()` loop:
+one hook in the place everything passes through, instead of `printf` calls
+scattered through every operator.
+
+## Next steps
+
+**Step D2: per-operator counts** (next). The `bdb_op_next` wrapper described
+above, with counters for `next` calls, chunks and rows in each operator's
+base, printed by `bdb_explain` after a run.
+
+**Step 5: `FILTER`** (`WHERE column op value`), a streaming operator between
+the scan and the aggregate. For each chunk it keeps only the matching rows.
+The first version copies them into its own chunk; the faster version (X100,
+DuckDB) passes a **selection vector** (the positions of the matching rows)
+instead of copying. If a whole chunk matches nothing, the filter keeps
+pulling until it has at least one row or its child is finished, so it never
+returns an empty chunk. The aggregate doesn't change: it just gets its
+chunks from the filter instead of the scan.
+
+## Execution decisions
+
+| # | Decision | Chosen | Why |
+|---|----------|--------|-----|
+| E1 | Processing model | **Volcano iterator, one chunk per `next`** (vectorized) | Per-row function calls would cost more than the actual work; chunks already come out of storage |
+| E2 | Pull or push | **Pull** | Matches the CSV and `.bdb` readers. Push helps parallel execution, which doesn't exist yet |
+| E3 | Operator "classes" | **Base struct as first field + function pointers** | Callers work with any operator; adding one needs no central `switch` |
+| E4 | Who closes the child | **Each operator closes its child** | `main` closes only the top operator |
+| E5 | Finding columns | **By name, in the first chunk received** | Works with any child; no schema needed on `BdbOperator` |
+| E6 | Filter output | **Copy matching rows first; selection vectors later** | Simpler to get right; switch once the engine works |
+| E7 | Aggregate kinds | **One operator; one loop updates count, sum, min and max; the result picks one** | Adding an aggregate doesn't touch the loop; costs a few comparisons per row |
+| E8 | Aggregate result types | **COUNT → INT, AVG → DOUBLE, SUM/MIN/MAX → the column's type**; NULL when there are no values (COUNT: 0) | Matches SQL |
+
+---
+
 ## Later
 
 Roughly in order, once v1 works end to end:
 
-1. **Query engine on chunks.** It pulls from `BDB_READER`, handles types and
-   NULLs, and adds `COUNT`, `MIN`, `MAX` and `AVG`.
+1. **Finish the executor basics** (Part 3, Next steps): the execution
+   debugger and `FILTER`.
 2. **Column projection.** The reader loads only the columns a query uses.
 3. **v2: statistics.** `null_count`, `min` and `max` per column per group, so
    a filter like `year = 2025` can skip whole groups.

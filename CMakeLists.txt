@@ -11,7 +11,6 @@ add_executable(BulletDB
         src/core/table.c
         src/csv/csv_reader.c
         src/csv/csv_tokenize.c
-        src/query/query.c
         src/storage/io.c
         src/storage/bdb_writer.h
         src/storage/bdb_writer.c
@@ -25,6 +24,8 @@ add_executable(BulletDB
         src/executor/scan.c
         src/executor/aggregate.h
         src/executor/aggregate.c
+        src/executor/explain.h
+        src/executor/explain.c
 )
 
 # Include paths are relative to src/, e.g. #include "core/chunk.h"

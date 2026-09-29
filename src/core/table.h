@@ -9,6 +9,7 @@
 
 #include "common/common.h"
 
+
 // Stored in .bdb files as one byte, so these values must not change.
 enum ColumnType {
     BDB_COL_INT = 0,   // int64_t
@@ -16,6 +17,13 @@ enum ColumnType {
     BDB_COL_BOOL = 3,
     BDB_COL_STR = 4
 };
+
+#define bdb_col_type(type) _Generic((type), \
+    BDB_COL_INT: int64_t, \
+    BDB_COL_DOUBLE: double, \
+    BDB_COL_BOOL: bool \
+)
+
 
 typedef struct {
     char* name;

@@ -8,13 +8,15 @@ only touches `price` and `year` never has to read any other column. Each
 column's values sit next to each other in memory, which helps the CPU cache
 and keeps scan loops tight.
 
-> **Status:** early work in progress. **Milestone reached: the storage round
-> trip works.** BulletDB streams a CSV as **chunks** of up to 2048 typed rows
-> (INT, DOUBLE, BOOL, with NULLs), writes them to its own columnar **`.bdb`
-> v1** file (row groups of column blocks, then a footer with the schema and
-> the offset of every block), and **streams them back out** of that file one
-> chunk at a time, holding only the footer and one chunk in memory. Next:
-> checking the values end to end with `SUM`, then a tiny query engine. See
+> **Status:** early work in progress. BulletDB streams a CSV as **chunks** of
+> up to 2048 typed rows (INT, DOUBLE, BOOL, with NULLs), writes them to its
+> own columnar **`.bdb` v1** file (row groups of column blocks, then a footer
+> with the schema and the offset of every block), and **streams them back
+> out** one chunk at a time. On top of that sits a small **vectorized query
+> executor**: a tree of operators (`SCAN` → `AGGREGATE`) that pass chunks up
+> to each other, which runs **`SUM`, `COUNT`, `MIN`, `MAX` and `AVG`** of a
+> column on a stored file, with SQL's NULL rules. Next: per-operator
+> statistics, and a `FILTER` operator for `WHERE`. See
 > [Current work](#current-work).
 
 For how the engine is built and why, and for the full `.bdb` v1
@@ -26,7 +28,7 @@ specification, see **[docs/DESIGN.md](docs/DESIGN.md)**.
 - [Usage](#usage)
 - [CSV input](#csv-input)
 - [Architecture](#architecture)
-- [Queries](#queries)
+- [Query execution](#query-execution)
 - [The .bdb file format](#the-bdb-file-format)
 - [Error handling](#error-handling)
 - [Project layout](#project-layout)
@@ -60,24 +62,40 @@ Windows).
 BulletDB <file.csv>
 ```
 
-One run does a full round trip:
+One run does two things:
 
-1. **Write:** reads the CSV one chunk at a time and writes every chunk to
+1. **Import:** reads the CSV one chunk at a time and writes every chunk to
    **`test-1.bdb`** in the current directory.
-2. **Read back:** opens `test-1.bdb` with the `.bdb` reader and streams every
-   chunk back out of it.
-3. **Report:** prints how many chunks and rows came back, next to the row
-   count stored in the file's footer:
+2. **Query:** builds a small operator tree over `test-1.bdb`, prints it, runs
+   it, and prints the result. The query is hard-coded in `main.c`, in the
+   `bdb_aggregate_init` call, for example `SUM(PRICEEACH)`:
 
 ```text
-reader streamed 111 chunks, 225721 rows (footer says 225721)
+AGGREGATE SUM(PRICEEACH)
+        +-SCAN (225721 rows, 5 columns, 2 groups)
++----------------+
+| SUM(PRICEEACH) |
+| double         |
++----------------+
+|    18883385.22 |
++----------------+
+(1 rows, 1 columns)
 ```
 
-For a 225,721-row file that's 60 full chunks from the first row group, 50
-full chunks plus one of 441 rows from the second, and 225,721 rows in total.
+The first two lines are the **plan** (`bdb_explain`), the table is the
+**result**: a chunk with one column and one row.
 
-To see the rows themselves, uncomment the `print_chunk_cb(chunk, &err);` line
-in either loop in `main.c`. Each chunk is printed like this:
+To run another query, change the two arguments in `main.c`:
+
+```c
+bdb_aggregate_init(&agg, &scan.base, BDB_AGG_COUNT, "PRICEEACH");
+//                                   ^ SUM, COUNT, MIN, MAX or AVG   ^ column name
+```
+
+A column name that doesn't exist fails with `Column X not found`.
+
+The same `print_chunk_cb` can print any chunk. In the import loop it shows the
+CSV data, printed like this:
 
 ```text
 +------+--------+-----------+
@@ -342,41 +360,75 @@ than 20 rows shows only the first and last 10 rows. A column whose `bitmap` is
 `print_chunk_cb` in `main.c` prints a chunk by wrapping it in a `TABLE` that
 points at the same columns, so nothing is copied.
 
-## Queries
+## Query execution
 
-> Switched off during the move to chunks. The scan loop in `query.c` is
-> commented out, so `bdb_run_query` returns 0.
+Queries run as a **tree of operators** (the Volcano / iterator model), where
+each call to `next` returns a whole **chunk** of up to 2048 rows instead of a
+single row (vectorized execution, as in MonetDB/X100 and DuckDB). The full
+design is in [docs/DESIGN.md, Part 3](docs/DESIGN.md#part-3-query-execution).
 
-A query aggregates one column, optionally filtered by a condition on another
-column (or the same one):
-
-```c
-BdbQuery query = {
-    .agg        = BDB_AGG_SUM,
-    .field      = "price",
-    .has_filter = true,
-    .filter     = { .field = "year", .op = BDB_OP_NE, .value = 2025 },
-};
-
-int64_t result = 0;
-BdbStatus status = bdb_run_query(&table, &query, &result, &err);
+```
+main ──next()──▶ AGGREGATE  SUM(PRICEEACH)     pulls every chunk, returns 1 row
+                      │ child
+                      ▼
+                 SCAN       test-1.bdb          streams chunks from the file
 ```
 
-This is equivalent to `SELECT SUM(price) FROM table WHERE year != 2025`.
+Every operator starts with the same base struct:
 
-Filter operators:
+```c
+struct BdbOperator {
+    BdbStatus (*next)(BdbOperator *self, const CHUNK **out, BdbError *err); // NULL at the end
+    void      (*close)(BdbOperator *self);                                  // closes the child too
+    void      (*describe)(BdbOperator *self, FILE *out);                    // one line for EXPLAIN
+    BdbOperator *child;                                                     // NULL for a scan
+};
+```
 
-| Operator | Meaning |
-|----------|---------|
-| `BDB_OP_EQ` | `=` |
-| `BDB_OP_NE` | `!=` |
-| `BDB_OP_LT` | `<` |
-| `BDB_OP_LE` | `<=` |
-| `BDB_OP_GT` | `>` |
-| `BDB_OP_GE` | `>=` |
+Each operator embeds it as its **first field** (like `Obj` in clox), and fills
+in the function pointers with its own versions:
 
-`bdb_run_query` looks up both columns by name with `bdb_find_column`, and
-returns `BDB_ERR_NOT_FOUND` if either one doesn't exist.
+| Operator | File | What it does |
+|----------|------|--------------|
+| `BdbScan` | `executor/scan.c` | Owns a `BDB_READER`; `next` returns the reader's next chunk |
+| `BdbAggregate` | `executor/aggregate.c` | `SUM`, `COUNT`, `MIN`, `MAX` or `AVG` of one column. Pulls **every** chunk from its child (a *pipeline breaker*), then returns one chunk with 1 column and 1 row |
+
+The aggregates, and the type of their result:
+
+| Aggregate | Result | Result type | With no non-NULL values |
+|-----------|--------|-------------|-------------------------|
+| `SUM` | total of the non-NULL values | the column's type | NULL |
+| `COUNT` | number of non-NULL values | always INT | 0 |
+| `MIN` | smallest value | the column's type | NULL |
+| `MAX` | largest value | the column's type | NULL |
+| `AVG` | total ÷ count | always DOUBLE | NULL |
+
+NULL values are skipped by all of them, as in SQL. They work on `INT` and
+`DOUBLE` columns.
+
+Running a query:
+
+```c
+BdbScan scan;
+BdbAggregate agg;
+
+status = bdb_scan_open(&scan, "test-1.bdb", &err);
+bdb_aggregate_init(&agg, &scan.base, BDB_AGG_SUM, "PRICEEACH");
+BdbOperator *op = &agg.base;          // main only talks to the top operator
+
+bdb_explain(op, stdout);              // print the plan
+
+while (status == BDB_OK && (status = op->next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
+    print_chunk_cb(chunk, &err);      // the 1-row result
+}
+op->close(op);                        // closes the whole tree
+```
+
+`bdb_explain` (`executor/explain.c`) prints the tree by following the `child`
+pointers and calling each operator's `describe`.
+
+The old int64-only query engine (`query/query.c`, `bdb_run_query`) has been
+removed.
 
 ## The .bdb file format
 
@@ -442,7 +494,7 @@ if (status != BDB_OK) {
 ```
 BulletDB/
 ├── CMakeLists.txt
-├── main.c                       entry point: CSV → chunks → test-1.bdb
+├── main.c                       entry point: CSV → test-1.bdb, then runs a query on it
 ├── sales.csv                    sample data
 ├── docs/
 │   ├── DESIGN.md                how the engine is built, and the .bdb v1 spec
@@ -456,8 +508,11 @@ BulletDB/
     ├── csv/
     │   ├── csv_reader.c / .h    CSV_READER: open, next_chunk, close
     │   └── csv_tokenize.c / .h  read_next_line, next_field, CSV limits
-    ├── query/
-    │   └── query.c / .h         old int64 query engine (switched off)
+    ├── executor/                the query executor (operators)
+    │   ├── bdb_operator.h       BdbOperator: the base struct (next, close, describe, child)
+    │   ├── scan.c / .h          BdbScan: streams chunks from a .bdb file
+    │   ├── aggregate.c / .h     BdbAggregate: SUM, COUNT, MIN, MAX, AVG of one column
+    │   └── explain.c / .h       bdb_explain: prints the operator tree
     └── storage/
         ├── bdb_format.h         magic, version, file limits
         ├── bdb_writer.c / .h    BDB_WRITER: open, append, finish, close
@@ -496,19 +551,57 @@ chunks through the engine."
        - [x] `bdb_reader_next_chunk`: streams up to 2048 rows per call,
              seeking straight to each column's rows in the current group
        - [x] `bdb_reader_close`
-8. [~] **Round trip:** CSV → `.bdb` → reader gives back the same rows
+8. [x] **Round trip:** CSV → `.bdb` → reader gives back the same rows
        - [x] Same number of chunks and rows (111 chunks, 225,721 rows)
-       - [ ] Same **values**: compare `SUM` of a column computed from the CSV
-             chunks and from the reader's chunks
-9. [ ] **`SUM`** over a column, pulling chunks from `BDB_READER`, skipping
-       NULLs: the first query on a stored file
+       - [x] Same **values**: the `SUM` of every column, computed from the CSV
+             chunks and from the reader's chunks, matched exactly (checked
+             once, before that test code was replaced by the executor)
+9. [~] **Query executor** (see [Query execution](#query-execution)), built
+       one operator at a time:
+       - [x] 1. `BdbOperator` base struct
+       - [x] 2. `SCAN` operator (owns a `BDB_READER`)
+       - [x] 3. `SCAN` used from `main` through the base pointer
+       - [x] 4a. `AGGREGATE` with `SUM`
+       - [x] D1. `describe` + `bdb_explain`: print the operator tree
+       - [x] 4b. More aggregates: `COUNT`, `MIN`, `MAX`, `AVG`, with NULL
+             handling (COUNT is 0, the others NULL, when there are no values)
+       - [ ] D2. `bdb_op_next`: one wrapper around every `next` call that
+             counts calls, chunks and rows per operator, shown in the tree
+             (**next**)
+       - [ ] 5. `FILTER` operator (`WHERE column op value`)
+       - [ ] D3. Time spent in each operator
+       - [ ] D4. Tracing: print the rows leaving a chosen operator
+
+Expected sums for the 225,721-row test file, to check the aggregate against:
+
+| Column | SUM |
+|--------|-----|
+| ORDERNUMBER | 2315614239 |
+| QUANTITYORDERED | 7921042 |
+| PRICEEACH | 18883385.22 |
+| ORDERLINENUMBER | 1459774 |
+| SALES | 802153919 |
 
 ### Milestone: storage round trip (2026-09-29)
 
 CSV → chunks → `.bdb` → chunks works end to end. A 225,721-row, 5-column
 CSV is written as 2 row groups and read back as 111 chunks with every row
-accounted for, while the reader holds only the footer (a few hundred bytes)
-and one 2048-row chunk in memory.
+accounted for, and every column's `SUM` matches the CSV exactly, while the
+reader holds only the footer (a few hundred bytes) and one 2048-row chunk in
+memory.
+
+### Milestone: first query through an operator tree (2026-09-29)
+
+`SUM(PRICEEACH)` runs as `AGGREGATE → SCAN` on the stored file and returns
+18883385.22, the same value as the CSV. `main` only talks to the top
+operator, and closing it closes the whole tree.
+
+### Milestone: all five basic aggregates (2026-09-30)
+
+`SUM`, `COUNT`, `MIN`, `MAX` and `AVG` run on `INT` and `DOUBLE` columns,
+skip NULLs, and return NULL (or 0 for `COUNT`) when there are no values. One
+loop over each chunk updates count, sum, min and max together; the result
+picks the one that was asked for.
 
 ## Performance
 
@@ -572,10 +665,16 @@ don't read much into the first chunk or a single slow chunk.
 
 - **Types come from the first data row only.** A later value that doesn't fit
   is stored wrongly instead of being rejected. For example, `abc` in an `INT`
-  column becomes `0`.
+  column becomes `0`, and in the sample `sales.csv` the `SALES` column is
+  detected as `INT` from its first value (`2871`), so later decimals like
+  `2765.9` are cut to `2765`.
+- **Only an empty field is NULL.** Text like `NULL` or `NA` is read as a value
+  (0 in a number column).
 - **No strings yet.** A `STR` column fails the import.
-- **No queries yet.** Data can be written to `.bdb` and streamed back, but
-  there's no query engine on top of it yet (`SUM` is next).
+- **Queries are hard-coded in `main.c`:** one aggregate of one column. There's
+  no `WHERE`, no `GROUP BY`, and no SQL text yet.
+- **Aggregates only work on `INT` and `DOUBLE` columns.** A `BOOL` column is
+  rejected, even for `COUNT`.
 - **The reader always reads every column.** Reading only the columns a query
   needs (projection) is planned; the format already supports it.
 - **CSV:** quoted fields and commas inside values aren't supported.
@@ -593,6 +692,9 @@ don't read much into the first chunk or a single slow chunk.
 Things that are broken right now, most serious first.
 
 **Crashes or wrong data**
+- [ ] The aggregate's "invalid column type" error message passes the
+      aggregate's name (a string) to a `%d`, so the message is wrong (and
+      it's undefined behavior). It should be `%s`
 - [ ] `csv_open` ignores the status returned by `parse_header`
 - [ ] An empty value in the first data row fails the import:
       `detect_file_type("")` returns `STR`, which is rejected
@@ -623,6 +725,13 @@ Things that are broken right now, most serious first.
 - [ ] `parse_header` still splits with `strtok`, so column names aren't
       trimmed and an empty name (`year,,price`) is skipped instead of
       reported. It could use `next_field` like the rows.
+- [ ] In `BdbAggregate`, the aggregate kind is stored in a field called
+      `type`, next to `col_type` for the column's type. The similar names
+      already caused one bug (a kind compared with column types); renaming it
+      to `kind` would prevent more
+- [ ] No compiler warnings are enabled. `-Wall -Wextra -Werror=return-type`
+      would have caught several crashes found by hand (missing `return`
+      statements, `%s` given a `FILE *`, a `size_t` passed as a `%*s` width)
 
 ## Roadmap
 
@@ -635,17 +744,18 @@ Things that are broken right now, most serious first.
       row groups, and a footer with the schema and every block's offset
 - [x] `.bdb` reader: opens a file, loads its footer, and streams the data
       back one chunk at a time
+- [x] Vectorized operator tree (`SCAN` → `AGGREGATE`), with `SUM`, `COUNT`,
+      `MIN`, `MAX`, `AVG` and an `EXPLAIN`-style plan printer
 - [x] Save and load tables in `.bdb`, with row groups (old int64 format, since
       replaced)
 - [x] `SUM` over a column, with single-condition filters (old int64 engine)
 - [ ] Everything under [Current work](#current-work)
 - [ ] CSV reader speedups (see [Performance](#performance))
-- [ ] `COUNT`, `MIN`, `MAX`, `AVG`
 - [ ] Multiple filter conditions (`AND` / `OR`)
 - [ ] `GROUP BY`
 - [ ] Per-row-group min/max statistics, used to skip groups during queries
-- [ ] Vectorized execution: queries run over one chunk at a time, in loops
-      the compiler can turn into SIMD instructions
+- [ ] Faster vectorized loops: selection vectors instead of copying filtered
+      rows, and inner loops the compiler can turn into SIMD instructions
 - [ ] Pack NULL bitmaps into 1 bit per row, stored as `uint64_t` words
       (32 words per 2048-row chunk)
 - [ ] Strings, stored with a dictionary

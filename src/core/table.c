@@ -10,6 +10,10 @@
 
 #include "common/common.h"
 
+
+
+
+
 size_t bdb_col_type_size(enum ColumnType type) {
     switch (type) {
         case BDB_COL_INT:
