@@ -8,12 +8,14 @@ only touches `price` and `year` never has to read any other column. Each
 column's values sit next to each other in memory, which helps the CPU cache
 and keeps scan loops tight.
 
-> **Status:** early work in progress. BulletDB streams a CSV as **chunks** of
-> up to 2048 typed rows (INT, DOUBLE, BOOL, with NULLs) and writes them to its
-> own columnar **`.bdb` v1** file: row groups of column blocks, then a footer
-> with the schema and the offset of every block. The **reader** can open a
-> `.bdb` file and load its footer; streaming the data back out, and the
-> **query engine**, are next. See [Current work](#current-work).
+> **Status:** early work in progress. **Milestone reached: the storage round
+> trip works.** BulletDB streams a CSV as **chunks** of up to 2048 typed rows
+> (INT, DOUBLE, BOOL, with NULLs), writes them to its own columnar **`.bdb`
+> v1** file (row groups of column blocks, then a footer with the schema and
+> the offset of every block), and **streams them back out** of that file one
+> chunk at a time, holding only the footer and one chunk in memory. Next:
+> checking the values end to end with `SUM`, then a tiny query engine. See
+> [Current work](#current-work).
 
 For how the engine is built and why, and for the full `.bdb` v1
 specification, see **[docs/DESIGN.md](docs/DESIGN.md)**.
@@ -58,18 +60,24 @@ Windows).
 BulletDB <file.csv>
 ```
 
-BulletDB reads the CSV one chunk at a time, prints each chunk as a table, and
-writes all of them to **`test-1.bdb`** in the current directory. Then it:
+One run does a full round trip:
 
-1. prints a summary of the file it wrote (`bdb_writer_debug_dump`),
-2. opens `test-1.bdb` again with the reader, and
-3. prints what the reader loaded from the file's footer
-   (`bdb_reader_debug_dump`), with a count of problems found.
+1. **Write:** reads the CSV one chunk at a time and writes every chunk to
+   **`test-1.bdb`** in the current directory.
+2. **Read back:** opens `test-1.bdb` with the `.bdb` reader and streams every
+   chunk back out of it.
+3. **Report:** prints how many chunks and rows came back, next to the row
+   count stored in the file's footer:
 
-The two summaries should match line for line. If they do, the file was
-written and read back consistently.
+```text
+reader streamed 111 chunks, 225721 rows (footer says 225721)
+```
 
-Each chunk is printed like this:
+For a 225,721-row file that's 60 full chunks from the first row group, 50
+full chunks plus one of 441 rows from the second, and 225,721 rows in total.
+
+To see the rows themselves, uncomment the `print_chunk_cb(chunk, &err);` line
+in either loop in `main.c`. Each chunk is printed like this:
 
 ```text
 +------+--------+-----------+
@@ -89,7 +97,18 @@ A chunk holds up to `BDB_VECTOR_SIZE` rows (2048, set in
 several chunks from a small CSV, lower `BDB_VECTOR_SIZE` to something like
 10.
 
-The two summaries at the end look like this (225,721 rows, 5 columns):
+### Debug dumps
+
+Two functions in `src/storage/debug.c` print a structured summary of a file's
+layout and check it. Call them from `main` when you need them:
+
+- `bdb_writer_debug_dump(&writer, stdout)`: after `bdb_writer_finish`, before
+  `bdb_writer_close`
+- `bdb_reader_debug_dump(&reader, stdout)`: after `bdb_reader_open`. Returns
+  the number of problems found.
+
+For the same file, the two should match line for line (225,721 rows, 5
+columns):
 
 ```text
 == BDB_WRITER ==
@@ -444,7 +463,7 @@ BulletDB/
         ├── bdb_writer.c / .h    BDB_WRITER: open, append, finish, close
         ├── memory.c / .h        GROW_CAPACITY / GROW_ARRAY (growing arrays by doubling)
         ├── io.c / .h            checked read helper
-        ├── bdb_reader.c / .h    BDB_READER: open (footer loaded); next_chunk and close to come
+        ├── bdb_reader.c / .h    BDB_READER: open (loads the footer), next_chunk (streams chunks), close
         └── debug.c / .h         bdb_writer_debug_dump, bdb_reader_debug_dump
 ```
 
@@ -467,18 +486,29 @@ chunks through the engine."
        copies chunks into a row group buffer, writes each full group, then the
        last partial group, the footer and the trailer. Checked byte by byte on
        a 1-row file (193 bytes) and with 160,000 rows (2 groups)
-7. [~] **`BDB_READER`** for the new format, with the same shape as
-       `CSV_READER` (`open` / `next_chunk` / `close`). It keeps only the header
-       and footer in memory and streams the data one chunk at a time.
+7. [x] **`BDB_READER`** for the new format, with the same shape as
+       `CSV_READER` (`open` / `next_chunk` / `close`). It keeps only the footer
+       and one chunk in memory and streams the data.
        - [x] `bdb_reader_open`: header, trailer and footer (schema, group row
              counts, every block's offset). Checked with
              `bdb_reader_debug_dump`: 0 problems, and identical to the
              writer's dump on a 225,721-row, 2-group file
-       - [ ] `bdb_reader_close`
-       - [ ] `bdb_reader_next_chunk`: stream the data
-8. [ ] **Round trip:** CSV → `.bdb` → reader gives back the same rows
+       - [x] `bdb_reader_next_chunk`: streams up to 2048 rows per call,
+             seeking straight to each column's rows in the current group
+       - [x] `bdb_reader_close`
+8. [~] **Round trip:** CSV → `.bdb` → reader gives back the same rows
+       - [x] Same number of chunks and rows (111 chunks, 225,721 rows)
+       - [ ] Same **values**: compare `SUM` of a column computed from the CSV
+             chunks and from the reader's chunks
 9. [ ] **`SUM`** over a column, pulling chunks from `BDB_READER`, skipping
-       NULLs
+       NULLs: the first query on a stored file
+
+### Milestone: storage round trip (2026-09-29)
+
+CSV → chunks → `.bdb` → chunks works end to end. A 225,721-row, 5-column
+CSV is written as 2 row groups and read back as 111 chunks with every row
+accounted for, while the reader holds only the footer (a few hundred bytes)
+and one 2048-row chunk in memory.
 
 ## Performance
 
@@ -493,20 +523,45 @@ CSV reader timings, per 2048-row chunk of a 3-column file (`INT`, `DOUBLE`,
 Splitting in place made the reader about **1.8 times faster**. It also fixed
 a leak of one allocation per field.
 
-Both runs were on the same machine with the same build settings, most likely
-a Debug build (`-O0`). A Release build (`-O2`) should be noticeably faster.
+### Full import benchmark
+
+CSV → `.bdb`, 5 columns (4 `INT`, 1 `DOUBLE`), `-O2`, MinGW GCC, warm file
+cache:
+
+| Stage | 1 M rows | 5 M rows | Per row | Share |
+|-------|----------|----------|---------|-------|
+| Reading lines only (`fgets`, no parsing) | 54 ms | 272 ms | ~53 ns | baseline |
+| **CSV parsing** (`csv_next_chunk`) | **580 ms** | **2,860 ms** | **~575 ns** | **~96%** |
+| `SUM` of one column over each chunk | 0.4 ms | 2.3 ms | 0.45 ns | ~0% |
+| Writer (`append` + `finish`) | 17 ms | 78 ms | ~16 ns | ~3% |
+| **Total** | **0.6 s** | **2.9 s** | | **~1.7 M rows/s, 40 MB/s** |
+
+- **The writer is fast** (about 60 M rows/s, close to the speed of copying
+  memory), and so is a scan (about 2 billion rows/s for `SUM` on one core).
+- **Almost all the time is CSV parsing**, and most of that is one function:
+  **`strtod` costs about 394 ns per call** with MinGW's C library, about 68%
+  of the parse time (one `DOUBLE` per row). `strtoll` costs about 10 ns, and
+  a hand-written integer loop about 1.5 ns.
+- `-O0` and `-O2` parse at the same speed, because the time is spent inside
+  the C library, not in BulletDB's code.
+- The `.bdb` file is **about 1.9 times the size of the CSV**: every integer
+  takes 8 bytes, and every value has a bitmap byte. Compression and narrower
+  integer types would fix this (see DESIGN.md, Later).
 
 Possible next speedups, biggest payoff first:
 
-1. **Cheaper checks.** Have `next_field` return the field's length instead
+1. **A fast path for decimals** instead of `strtod`: parse `39.61` as the
+   integer 3961 and divide by 10², which gives exactly the same result as
+   `strtod` for up to 15 significant digits and small exponents, and fall back
+   to `strtod` otherwise. Expected: parsing about 2.5–3 times faster.
+2. **A dedicated integer parser** instead of `strtoll`.
+3. **Cheaper checks.** Have `next_field` return the field's length instead
    of calling `strlen` again for the max-field check, and check the first
    character before calling `strcasecmp` for BOOL.
-2. **A dedicated integer parser** instead of `strtoll`.
-3. **Reading in large blocks** (`fread` plus `memchr`) instead of calling
+4. **Reading in large blocks** (`fread` plus `memchr`) instead of calling
    `fgets` once per line. `fgets` locks the `FILE` on every call, and
    `read_next_line` scans each line with `strlen` twice.
-4. Later: SIMD scanning and parsing on several threads. `strtod` is also
-   slow, but replacing it correctly needs a specialized algorithm.
+5. Later: SIMD scanning and parsing on several threads.
 
 To measure, time each `csv_next_chunk` call with a monotonic clock
 (`QueryPerformanceCounter` on Windows, `clock_gettime(CLOCK_MONOTONIC)`
@@ -519,9 +574,10 @@ don't read much into the first chunk or a single slow chunk.
   is stored wrongly instead of being rejected. For example, `abc` in an `INT`
   column becomes `0`.
 - **No strings yet.** A `STR` column fails the import.
-- **No reading data back or queries yet.** The reader can open a `.bdb` file
-  and load its footer, but it can't stream the values out until
-  `bdb_reader_next_chunk` exists.
+- **No queries yet.** Data can be written to `.bdb` and streamed back, but
+  there's no query engine on top of it yet (`SUM` is next).
+- **The reader always reads every column.** Reading only the columns a query
+  needs (projection) is planned; the format already supports it.
 - **CSV:** quoted fields and commas inside values aren't supported.
 - **Fixed output file.** `main` always writes `test-1.bdb`.
 - **File format:** little-endian only. No per-group statistics or compression
@@ -544,20 +600,17 @@ Things that are broken right now, most serious first.
       columns: the writer only learns the schema from the first chunk
 - [ ] `bdb_write_group` doesn't check `_ftelli64` for failure (-1) before
       storing it as an offset
-- [ ] `bdb_reader_open` allocates `chunk.columns` with
-      `realloc(..., sizeof(COLUMN) * (uint16_t)(&reader->chunk.col_count + 1))`,
-      which uses the field's **address** instead of its value, so the size is
-      effectively random. It should be `calloc(col_count, sizeof(COLUMN))`
 - [ ] `bdb_reader_open` doesn't yet reject a bad `footer_offset`, a
       `col_count` outside 1..100, bad group row counts, or a footer that
       doesn't end at the trailer (these are only checked by
-      `bdb_reader_debug_dump`)
-- [ ] `bdb_reader_open` uses plain `fseek` (32-bit on Windows) in two places,
-      and doesn't check the `name_len` read or the `malloc` results
+      `bdb_reader_debug_dump`). A corrupted footer could make `next_chunk`
+      read from the wrong place
+- [ ] `bdb_reader_open` uses plain `fseek` (32-bit on Windows) in two places
+      (trailer and footer), so files over 2 GB would be read from the wrong
+      position. It also doesn't check the `name_len` read or the `malloc`
+      results for `row_groups` and `offsets`
 
 **Memory**
-- [ ] There's no `bdb_reader_close`, so the reader's file, column names and
-      footer arrays are never freed, including on every error path
 - [ ] `free_table` doesn't free `bitmap`
 - [ ] If `csv_open` fails, `main` returns without calling `csv_close`, so the
       file and buffer leak
@@ -580,7 +633,8 @@ Things that are broken right now, most serious first.
 - [x] Bordered table printer
 - [x] Columnar `.bdb` v1 file writer: typed column blocks with NULL bitmaps,
       row groups, and a footer with the schema and every block's offset
-- [x] `.bdb` reader, part 1: opens a file and loads its footer
+- [x] `.bdb` reader: opens a file, loads its footer, and streams the data
+      back one chunk at a time
 - [x] Save and load tables in `.bdb`, with row groups (old int64 format, since
       replaced)
 - [x] `SUM` over a column, with single-condition filters (old int64 engine)

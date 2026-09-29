@@ -7,8 +7,10 @@ format with its writer and reader.
   the CSV side.
 - Part 2, [.bdb v1](#part-2-bdb-v1-file-format), covers the file format. The
   **writer is built** and produces files that match the spec byte for byte.
-  The **reader is half built**: `bdb_reader_open` loads and checks the header,
-  trailer and footer (milestone 1). Streaming the data (`next_chunk`) is next.
+  The **reader is built**: it loads and checks the footer, then streams the
+  data back one chunk at a time. **Milestone: the storage round trip (CSV →
+  `.bdb` → chunks) works.** Checking the values end to end, and the first
+  query (`SUM`), are next.
 
 The README covers building, usage and the list of known bugs. This document
 covers the structure of the engine and the reasons behind it.
@@ -89,7 +91,7 @@ All paths are under `src/`, which is the include root: code writes
 | Common | `common/common.c` | `BdbStatus`, `BdbError` |
 | Core | `core/chunk.c`, `core/table.c` | `COLUMN`, `CHUNK`, `TABLE`, types, `print_table`. `chunk.h` defines `BDB_VECTOR_SIZE` and `BDB_ROW_GROUP_SIZE` |
 | CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
-| Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → footer (data streaming next). `bdb_format.h` holds the magic, version and file limits |
+| Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → chunks again (footer loaded once, data streamed). `bdb_format.h` holds the magic, version and file limits |
 | Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump` |
 | Query | `query/query.c` | Old int64 query engine, switched off |
 
@@ -598,8 +600,8 @@ The reader is a **source**, with the same shape as `CSV_READER`.
 | Milestone | What | Status |
 |-----------|------|--------|
 | M1 | `bdb_reader_open`: header, trailer and footer loaded and checked | **Done**, verified with `bdb_reader_debug_dump` |
-| M2 | `bdb_reader_next_chunk`: stream the data one chunk at a time | Next |
-| M3 | Round trip (CSV → `.bdb` → reader gives the same rows), then `SUM` | After M2 |
+| M2 | `bdb_reader_next_chunk` + `bdb_reader_close`: stream the data one chunk at a time | **Done**: 225,721 rows come back as 111 chunks |
+| M3 | Round trip with values (CSV → `.bdb` → reader gives the same values), then `SUM` | Next |
 
 ```c
 typedef struct {
@@ -612,18 +614,33 @@ typedef struct {
     uint32_t  *row_groups;    // [group_count]            rows in each group
     uint64_t  *offsets;       // [group_count * col_count] offset of each column block
 
-    // Schema (names, types in chunk.columns); later also the buffers for
-    // BDB_VECTOR_SIZE rows, reused by next_chunk:
+    // Schema (names, types in chunk.columns) plus buffers for
+    // BDB_VECTOR_SIZE rows per column, allocated once at the end of open and
+    // reused by every next_chunk:
     CHUNK      chunk;
 
-    // Planned for M2:
-    // uint32_t group;          current group
-    // uint32_t row_in_group;   next row to read in it
+    // Position for next_chunk:
+    uint32_t   group_index;   // current row group
+    uint64_t   rows_in_group; // next row to read, counted from the start of that group
 } BDB_READER;
 
-BdbStatus bdb_reader_open      (BDB_READER *r, const char *path, BdbError *err);  // done
-BdbStatus bdb_reader_next_chunk(BDB_READER *r, const CHUNK **out, BdbError *err); // M2
-void      bdb_reader_close     (BDB_READER *r);                                   // to add
+BdbStatus bdb_reader_open      (BDB_READER *r, const char *path, BdbError *err);
+BdbStatus bdb_reader_next_chunk(BDB_READER *r, const CHUNK **out, BdbError *err);
+void      bdb_reader_close     (BDB_READER *r);
+```
+
+Using it looks exactly like the CSV reader:
+
+```c
+BDB_READER reader = {0};
+const CHUNK *chunk;
+
+BdbStatus status = bdb_reader_open(&reader, "test-1.bdb", &err);
+while (status == BDB_OK &&
+       (status = bdb_reader_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
+    /* use chunk */
+}
+bdb_reader_close(&reader);
 ```
 
 **How `open` reads the footer.** It seeks to `footer_offset`, reads
@@ -658,12 +675,40 @@ bdb_reader_open
 bdb_reader_next_chunk     one CHUNK buffer (2048 rows), reused
 ```
 
-- `open` validates the file and loads the footer.
-- `next_chunk` reads the next (up to) 2048 rows of the current group. For
-  each column, it seeks to `offset + row_in_group` for the bitmap and to
-  `offset + n + row_in_group × type_size` for the values, where `n` is the
-  group's row count. When a group runs out, it moves to the next group. It
-  returns `NULL` at the end.
+- `open` validates the file, loads the footer, and allocates the chunk's
+  buffers (2048 values and 2048 bitmap bytes per column).
+- `next_chunk` reads the next rows of the current group:
+
+  ```
+  *out = NULL
+  group_index == group_count ?                → return OK (no rows left)
+
+  n     = row_groups[group_index]              rows in this group
+  count = min(2048, n − rows_in_group)
+
+  for each column c:
+      base = offsets[group_index × col_count + c]
+      bitmap: seek base + rows_in_group                read count bytes
+      values: seek base + n + rows_in_group × size     read count × size bytes
+
+  chunk.count = count
+  rows_in_group += count
+  rows_in_group == n ?  → group_index++, rows_in_group = 0
+  *out = &chunk
+  ```
+
+  The values start after the **whole** bitmap, so their seek adds `n` (the
+  group's row count), not `rows_in_group`. A short read or a failed seek
+  returns `BDB_ERR_IO`. After the last group it keeps returning `NULL`.
+- `close` frees the column names, the chunk buffers and the footer arrays,
+  and closes the file. It's safe after an `open` that failed partway,
+  because the struct starts zeroed and `chunk.columns` comes from `calloc`.
+
+Because a row group is a whole number of chunks (except the last group), a
+chunk never spans two groups. A chunk has fewer than 2048 rows only at the end
+of a group, which in practice means the last chunk of the file. For 225,721
+rows in groups of 122,880 and 102,841: 60 chunks, then 50 chunks plus one
+of 441 rows, 111 in total.
 
 Memory therefore doesn't depend on the file size: the footer is 8 bytes per
 column per group plus 4 per group, and the chunk buffer is about 18 KB per
@@ -672,8 +717,23 @@ column per group plus 4 per group, and the chunk buffer is about 18 KB per
 Seeks must be 64-bit (`_fseeki64` on Windows, `fseeko` elsewhere), because
 plain `fseek` takes a `long`, which is 32-bit on Windows.
 
-**The round-trip test:** CSV → writer → `test.bdb` → reader, then compare
-each chunk with the CSV's chunks. Same row count, same values, same bitmaps.
+**The round-trip test:** CSV → writer → `test-1.bdb` → reader, then compare
+with the CSV's chunks. Same row count (done: 225,721 rows in 111 chunks),
+same values and same bitmaps (next: compare `SUM` of each column from both
+sides; the values go through the file unchanged and in the same order, so the
+sums must be exactly equal, not just close).
+
+**Mistakes made while building it**, worth remembering for the next reader or
+writer:
+- Passing `&col->bitmap` (the address of the pointer) to `fread` instead of
+  `col->bitmap` (the buffer). It writes over the `COLUMN` struct itself.
+- Seeking to `base + rows_in_group + rows_in_group × size` for the values,
+  which skips only part of the bitmap. The bitmap is `n` bytes long.
+- Reading `BDB_VECTOR_SIZE` rows instead of `count`, which runs past the end
+  of the group's block for the last chunk.
+- A missing `return BDB_OK;` at the end of `next_chunk`: harmless while the
+  caller ignored the status, but it broke the loop as soon as the status was
+  checked. `-Werror=return-type` makes this a build error.
 
 Later, `next_chunk` can take a list of wanted columns and read only those.
 That's the payoff of the columnar layout.
