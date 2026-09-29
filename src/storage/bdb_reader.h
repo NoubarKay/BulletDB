@@ -22,9 +22,19 @@ typedef struct {
 
     uint32_t *row_groups;
     uint64_t *offsets;
+
+    //current row group we are on
+    uint32_t group_index;
+
+    //current rows in the current row group we are on
+    uint64_t rows_in_group;
 } BDB_READER;
 
 BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err);
+
+BdbStatus bdb_reader_next_chunk(BDB_READER *reader, const CHUNK **out, BdbError *err);
+
+void bdb_reader_close(BDB_READER *reader);
 
 
 #endif //BULLETDB_BDB_READER_H

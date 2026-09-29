@@ -11,8 +11,6 @@
 BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
     *reader = (BDB_READER){0};
 
-    BdbStatus status;
-
     reader->file = fopen(path, "rb");
     if (reader->file == NULL) {
         return bdb_error_set(err, BDB_ERR_OPEN, "could not open '%s'", path);
@@ -64,21 +62,15 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
     }
 
 
-    //Initialize the chunk
-    status = chunk_init(&reader->chunk, reader->col_count);
-    if (status != BDB_OK) {
-        return status;
+    // One COLUMN per column. calloc sets every name/data/bitmap pointer to
+    // NULL, so bdb_reader_close can free whatever was filled in, even if we
+    // fail halfway through the loop below.
+    reader->chunk.columns = calloc(reader->col_count, sizeof(COLUMN));
+    if (reader->chunk.columns == NULL) {
+        return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for %u columns", reader->col_count);
     }
-
+    // Set only once the array exists, so chunk_free never loops over NULL.
     reader->chunk.col_count = reader->col_count;
-
-    COLUMN *temp = realloc(reader->chunk.columns, sizeof(COLUMN) * (uint16_t)(&reader->chunk.col_count + 1));
-
-    if (temp == NULL) {
-        return bdb_error_set(err, BDB_ERR_INVALID, "Failed to allocate memory for chunk columns.");
-    }
-
-    reader->chunk.columns = temp;
 
     for (uint16_t c = 0; c < reader->col_count; c++) {
         uint16_t name_len = 0;
@@ -122,5 +114,78 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
     }
 
 
+    for (uint16_t c = 0; c < reader->col_count; c++) {
+        COLUMN *col = &reader->chunk.columns[c];
+        col->data   = calloc(BDB_VECTOR_SIZE, bdb_col_type_size(col->type));
+        col->bitmap = calloc(BDB_VECTOR_SIZE, 1);
+        if (col->data == NULL || col->bitmap == NULL) {
+          return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column '%s'", col->name);
+        }
+    }
+
     return BDB_OK;
+}
+
+BdbStatus bdb_reader_next_chunk(BDB_READER *reader, const CHUNK **out, BdbError *err) {
+
+    *out = NULL;
+    chunk_reset(&reader->chunk);
+
+    if (reader->group_index == reader->group_count) {
+        return BDB_OK;                                   // no rows left
+    }
+
+
+    size_t n = reader->row_groups[reader->group_index];
+    size_t left = n - reader->rows_in_group;
+    size_t to_take = left > BDB_VECTOR_SIZE ? BDB_VECTOR_SIZE : left;
+
+
+    for (uint16_t c = 0; c < reader->col_count; c++) {
+        COLUMN  *col  = &reader->chunk.columns[c];
+        uint64_t base = reader->offsets[(size_t)reader->group_index * reader->col_count + c];
+        size_t   size = bdb_col_type_size(col->type);
+
+        // bitmap: 1 byte per row, starting at this chunk's first row
+        if (_fseeki64(reader->file, (int64_t)(base + reader->rows_in_group), SEEK_SET) != 0 ||
+            fread(col->bitmap, 1, to_take, reader->file) != to_take) {
+            return bdb_error_set(err, BDB_ERR_IO, "could not read bitmap of column '%s'", col->name);
+        }
+
+        // values: after the whole bitmap (n bytes), then this chunk's first row
+        if (_fseeki64(reader->file, (int64_t)(base + n + reader->rows_in_group * size), SEEK_SET) != 0 ||
+            fread(col->data, size, to_take, reader->file) != to_take) {
+            return bdb_error_set(err, BDB_ERR_IO, "could not read values of column '%s'", col->name);
+        }
+    }
+
+    reader->chunk.count = to_take;
+    reader->rows_in_group += to_take;
+
+    if (reader->rows_in_group == n) {
+        reader->group_index++;
+        reader->rows_in_group = 0;
+    }
+
+    *out = &reader->chunk;
+    return BDB_OK;
+}
+
+void bdb_reader_close(BDB_READER *reader) {
+    // Column names (and, later, the chunk buffers). Safe on a zeroed chunk.
+    chunk_free(&reader->chunk);
+
+    free(reader->row_groups);
+    free(reader->offsets);
+    reader->row_groups = NULL;
+    reader->offsets = NULL;
+
+    if (reader->file != NULL) {
+        fclose(reader->file);
+        reader->file = NULL;
+    }
+
+    reader->row_count = 0;
+    reader->col_count = 0;
+    reader->group_count = 0;
 }

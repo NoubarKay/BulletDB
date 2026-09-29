@@ -61,7 +61,6 @@ int main(int argc, char *argv[]) {
     while ((status = csv_next_chunk(&csvReader, &chunk, &err)) == BDB_OK && chunk != NULL) {
         status = bdb_writer_append(&writer, chunk, &err);
         if (status != BDB_OK) break;
-        print_chunk_cb(chunk, &err);
     }
 
     if (status == BDB_OK) {
@@ -69,7 +68,6 @@ int main(int argc, char *argv[]) {
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
 
-    bdb_writer_debug_dump(&writer, stdout);
 
     csv_close(&csvReader);
     bdb_writer_close(&writer);
@@ -79,7 +77,23 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "error: %s\n", err.message);
     }
 
-    bdb_reader_debug_dump(&reader, stdout);
+
+    if (status == BDB_OK) {
+        uint64_t chunks_read = 0;
+        uint64_t rows_read = 0;
+
+        while ((status = bdb_reader_next_chunk(&reader, &chunk, &err)) == BDB_OK && chunk != NULL) {
+            chunks_read++;
+            rows_read += chunk->count;
+            // print_chunk_cb(chunk, &err);   // uncomment to see each chunk's rows
+        }
+        if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);
+
+        printf("\nreader streamed %" PRIu64 " chunks, %" PRIu64 " rows (footer says %" PRIu64 ")\n",
+               chunks_read, rows_read, reader.row_count);
+    }
+
+    bdb_reader_close(&reader);
 
     return status == BDB_OK ? 0 : 1;
 
