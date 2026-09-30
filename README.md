@@ -1,5 +1,14 @@
 # BulletDB
 
+> [!WARNING]
+> **v0.2 is currently in active development — this is NOT PRODUCTION READY.**
+> BulletDB is an early-stage research project. The file format, APIs and
+> on-disk layout will change without notice. Do not use it to store data you
+> care about.
+>
+> v0.1 (tagged) is the last stable snapshot. v0.2 is adding per-group
+> min/max statistics and a zone-map optimizer. See [Roadmap](#roadmap).
+
 A columnar OLAP (analytical) database engine written in C.
 
 BulletDB is built for analytical queries: scanning, filtering and aggregating

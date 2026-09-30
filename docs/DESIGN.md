@@ -10,8 +10,9 @@ This document describes how BulletDB is built today: the data model, the
   chunks) gives back every value exactly.
 - Part 3, [Query execution](#part-3-query-execution), covers the executor: a
   tree of operators passing chunks to each other. **`SCAN` and `AGGREGATE`
-  (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`) work**, together with a plan printer.
-  Per-operator statistics and `FILTER` are next.
+  (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`) work**, together with a plan printer
+  and per-operator stats and timing (D1–D3). The optimizer design (zone maps,
+  per-operator optimization passes) and `FILTER` are next.
 
 The README covers building, usage and the list of known bugs. This document
 covers the structure of the engine and the reasons behind it.
@@ -1045,6 +1046,60 @@ pulling until it has at least one row or its child is finished, so it never
 returns an empty chunk. The aggregate doesn't change: it just gets its
 chunks from the filter instead of the scan.
 
+## Optimizer
+
+The optimizer sits between plan construction and execution. It transforms the
+operator tree to avoid work — skipping data the query can't use — without
+changing the result.
+
+### Zone-map optimizer (planned for v0.2)
+
+The first and most impactful pass uses **per-group min/max statistics** (zone
+maps) stored in the footer (see v2 format, below). Before scanning a row
+group, the optimizer classifies it against the query's filter predicate:
+
+| Outcome | Condition | Action |
+|---------|-----------|--------|
+| `SKIP`  | `group_max < predicate_value` (or equivalent) | No I/O; group contributes nothing |
+| `FULL`  | `group_min >= predicate_value` — every row matches | Use stored `sum`/`null_count` directly; skip the scan |
+| `SCAN`  | Otherwise — uncertain | Stream chunks through the normal vector path |
+
+```
+                    sales.bdb
+                       │
+               ┌───────┴────────┐
+               │ row-group stats │
+               └───────┬────────┘
+                        │
+           ┌────────────┼────────────┐
+           ↓            ↓            ↓
+        group 1      group 2      group 3
+        all match    none match   uncertain
+           │            │            │
+           ↓            ↓            ↓
+      metadata SUM    skip       vector scan
+```
+
+For a `FULL` group, `BdbAggregate` needs a second accumulation path —
+`accumulate_from_stats(sum, count, min, max)` — so the result is correct
+whether a group was scanned or not.
+
+This requires the v2 footer additions described in "Later" below.
+
+### Per-operator optimization (later passes)
+
+Once zone maps exist, each operator gets its own deeper optimization layer:
+
+| Operator | Level 1 (zone maps) | Level 2 (row-level) | Level 3 (expression) |
+|----------|---------------------|---------------------|----------------------|
+| **Filter** | Skip non-matching groups | SIMD predicate evaluation on uncertain groups | Late materialization — don't load non-predicate columns until after filtering |
+| **Aggregate** | Accumulate `FULL` groups from stats, skip `SKIP` groups | Tight accumulation loop, SIMD-friendly | Pre-aggregation per group before combining |
+| **Join** | Bloom filter on build side to pre-filter probe groups | Hash join vs. merge join based on size estimates | Partition pruning |
+
+The pattern is the same every time: zone maps give **group-level** decisions
+for free once the stats exist; each operator then adds its own **row-level**
+and **expression-level** tricks on top.
+
 ## Execution decisions
 
 | # | Decision | Chosen | Why |
@@ -1067,8 +1122,27 @@ Roughly in order, once v1 works end to end:
 1. **Finish the executor basics** (Part 3, Next steps): the execution
    debugger and `FILTER`.
 2. **Column projection.** The reader loads only the columns a query uses.
-3. **v2: statistics.** `null_count`, `min` and `max` per column per group, so
-   a filter like `year = 2025` can skip whole groups.
+3. **v2: row-group statistics.** Add per-column per-group stats to the footer,
+   stored alongside each group's existing `offset`:
+
+   ```
+   for each group:
+       row_count    u32
+       for each column:
+           offset      u64          (already in v1)
+           min         8 bytes      typed the same as the column
+           max         8 bytes
+           null_count  u32
+           sum         8 bytes      (0 for BOOL)
+   ```
+
+   The writer already sees every value during `bdb_writer_append`, so
+   tracking `min`/`max`/`sum`/`null_count` is a per-row comparison added to
+   the copy loop — essentially free. When `bdb_write_group` fires, the
+   accumulators are committed to the footer arrays and reset.
+
+   These stats are the prerequisite for the zone-map optimizer (see above):
+   a `SKIP` group costs zero I/O; a `FULL` group costs only a footer read.
 4. **Packed bitmaps:** 1 bit per row, stored as `uint64_t` words (32 words per
    2048-row chunk), in memory and on disk.
 5. **Strings,** stored with a dictionary.
