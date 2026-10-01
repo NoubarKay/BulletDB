@@ -30,7 +30,8 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
     TABLE view = {
         .row_count = chunk->count,
         .col_count = chunk->col_count,
-        .columns = chunk->columns
+        .columns = chunk->columns,
+        .sel_vector = chunk->sel_vector,
     };
     print_table(&view);
     return BDB_OK;
@@ -81,11 +82,11 @@ int main(int argc, char *argv[]) {
 
 
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GT, "22");
-    bdb_aggregate_init(&agg, &filter.base, BDB_AGG_COUNT, "QUANTITYORDERED");
-    BdbOperator *op = &agg.base;
+    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GE, "45");
+    BdbOperator *op = &filter.base;
 
     while (status == BDB_OK && (status = bdb_op_next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
+        if (chunk->count == 0) continue;
         print_chunk_cb(chunk, &err);
     }
     if (status != BDB_OK) fprintf(stderr, "error: %s\n", err.message);

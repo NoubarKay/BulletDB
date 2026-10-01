@@ -175,6 +175,27 @@ static void test_small(void) {
         CHECK(!r.valid);
     }
 
+    // The writer refuses a filtered chunk: it copies rows 0..count-1, so it
+    // would save the rows the filter rejected.
+    {
+        BdbScan scan;
+        BdbFilter filter;
+        BDB_WRITER writer = {0};
+        const CHUNK *chunk = NULL;
+
+        CHECK_STATUS(bdb_scan_open(&scan, SMALL_BDB, &err), BDB_OK, err);
+        bdb_filter_init(&filter, &scan.base, "qty", BDB_COMPARE_GE, "40");
+        CHECK_STATUS(bdb_op_next(&filter.base, &chunk, &err), BDB_OK, err);
+        CHECK(chunk != NULL && chunk->count == 3 && chunk->sel_vector != NULL);
+
+        CHECK_STATUS(bdb_writer_open(&writer, "filter_selected.bdb", &err), BDB_OK, err);
+        if (chunk != NULL) {
+            CHECK(bdb_writer_append(&writer, chunk, &err) == BDB_ERR_INVALID);
+        }
+        bdb_writer_close(&writer);
+        filter.base.close(&filter.base);      // closes the filter and the scan
+    }
+
     // Errors: a column that doesn't exist, and a type that can't be filtered.
     {
         Cond c = { "nope", BDB_COMPARE_EQ, "1" };
