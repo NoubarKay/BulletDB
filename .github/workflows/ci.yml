@@ -1,7 +1,9 @@
 name: CI
 
-# Build and test on every push and pull request to main, and on version tags,
-# so a release can only be tagged from a commit that passes.
+# When it runs:
+#   - pull requests to main: only the build jobs and test areas affected by the
+#     changed files (docs-only changes skip the build entirely)
+#   - pushes to main, version tags (v*), manual runs: everything, always
 on:
   push:
     branches: [main]
@@ -19,8 +21,91 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Decide what to run, from the files changed in a pull request.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Decide what to test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code:       ${{ steps.decide.outputs.code }}
+      format:     ${{ steps.decide.outputs.format }}
+      roundtrip:  ${{ steps.decide.outputs.roundtrip }}
+      aggregates: ${{ steps.decide.outputs.aggregates }}
+      corrupt:    ${{ steps.decide.outputs.corrupt }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            code:                       # anything that's compiled or builds it
+              - 'src/**'
+              - 'tests/**'
+              - 'main.c'
+              - 'CMakeLists.txt'
+              - '.github/workflows/**'
+            everything:                 # changes that every test depends on
+              - 'CMakeLists.txt'
+              - 'tests/CMakeLists.txt'
+              - 'tests/test_util.h'
+              - '.github/workflows/**'
+              - 'src/common/**'
+              - 'src/core/**'
+              - 'src/csv/**'
+              - 'src/storage/bdb_writer.*'
+              - 'src/storage/bdb_format.h'
+              - 'src/storage/io.*'
+              - 'src/storage/memory.*'
+            reader:
+              - 'src/storage/bdb_reader.*'
+            executor:
+              - 'src/executor/**'
+            test_format:     ['tests/test_format.c']
+            test_roundtrip:  ['tests/test_roundtrip.c']
+            test_aggregates: ['tests/test_aggregates.c']
+            test_corrupt:    ['tests/test_corrupt.c']
+
+      - name: Decide
+        id: decide
+        shell: bash
+        run: |
+          # Outside pull requests, run everything.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then all=false; else all=true; fi
+
+          any() { for v in "$@"; do if [ "$v" = "true" ]; then echo true; return; fi; done; echo false; }
+
+          code='${{ steps.filter.outputs.code }}'
+          every='${{ steps.filter.outputs.everything }}'
+          reader='${{ steps.filter.outputs.reader }}'
+          executor='${{ steps.filter.outputs.executor }}'
+
+          # Which source areas each test exercises:
+          #   format     - CSV import + writer
+          #   roundtrip  - CSV import + writer + reader + executor
+          #   aggregates - CSV import + writer + reader + executor
+          #   corrupt    - writer + reader
+          {
+            echo "code=$(any $all "$code")"
+            echo "format=$(any $all "$every" '${{ steps.filter.outputs.test_format }}')"
+            echo "roundtrip=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_roundtrip }}')"
+            echo "aggregates=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_aggregates }}')"
+            echo "corrupt=$(any $all "$every" "$reader" '${{ steps.filter.outputs.test_corrupt }}')"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Linux, GCC, Release
+  # ---------------------------------------------------------------------------
   linux:
     name: Linux (GCC, Release)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -29,14 +114,37 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
 
       - name: Build
+        id: build
         run: cmake --build build --parallel
 
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+      - name: "Test: format (.bdb layout, byte for byte)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.format == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_format$"
 
+      - name: "Test: round trip (CSV → .bdb → reader)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.roundtrip == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_roundtrip$"
+
+      - name: "Test: aggregates (SUM/COUNT/MIN/MAX/AVG)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.aggregates == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_aggregates$"
+
+      - name: "Test: corrupt files are rejected"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.corrupt == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_corrupt$"
+
+  # ---------------------------------------------------------------------------
+  # Linux, GCC, AddressSanitizer + UndefinedBehaviorSanitizer
+  # ---------------------------------------------------------------------------
   sanitizers:
     name: Linux (GCC, AddressSanitizer + UBSan)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    env:
+      # Any memory error, leak or undefined behavior fails the test.
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - uses: actions/checkout@v4
 
@@ -44,17 +152,32 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc -DBDB_SANITIZE=ON
 
       - name: Build
+        id: build
         run: cmake --build build --parallel
 
-      - name: Test
-        # Any memory error, leak or undefined behavior fails the test.
-        env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build --output-on-failure
+      - name: "Test: format (.bdb layout, byte for byte)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.format == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_format$"
 
+      - name: "Test: round trip (CSV → .bdb → reader)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.roundtrip == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_roundtrip$"
+
+      - name: "Test: aggregates (SUM/COUNT/MIN/MAX/AVG)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.aggregates == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_aggregates$"
+
+      - name: "Test: corrupt files are rejected"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.corrupt == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_corrupt$"
+
+  # ---------------------------------------------------------------------------
+  # Windows, MSYS2 MinGW-w64, Release (the same kind of toolchain as CLion)
+  # ---------------------------------------------------------------------------
   windows:
     name: Windows (MinGW-w64, Release)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -75,7 +198,21 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
+        id: build
         run: cmake --build build
 
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+      - name: "Test: format (.bdb layout, byte for byte)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.format == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_format$"
+
+      - name: "Test: round trip (CSV → .bdb → reader)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.roundtrip == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_roundtrip$"
+
+      - name: "Test: aggregates (SUM/COUNT/MIN/MAX/AVG)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.aggregates == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_aggregates$"
+
+      - name: "Test: corrupt files are rejected"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.corrupt == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_corrupt$"

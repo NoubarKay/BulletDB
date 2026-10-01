@@ -123,8 +123,8 @@ ctest --test-dir build-asan --output-on-failure
 
 ### Continuous integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and runs the
-tests on every push and pull request to `main`, and on version tags (`v*`):
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests the
+engine in three jobs:
 
 | Job | Platform | Purpose |
 |-----|----------|---------|
@@ -132,8 +132,36 @@ tests on every push and pull request to `main`, and on version tags (`v*`):
 | Linux (GCC, AddressSanitizer + UBSan) | Ubuntu 24.04 | Fails on any memory error, leak or undefined behavior |
 | Windows (MinGW-w64, Release) | Windows | The same kind of toolchain as CLion on Windows |
 
+Inside each job, every test area is its **own step**, with its own ✓ / ✗ /
+skipped in the Actions page: *format*, *round trip*, *aggregates* and
+*corrupt files*. All of them run even when one fails.
+
+**What runs when:**
+
+| Event | Runs |
+|-------|------|
+| Push to `main`, a `v*` tag, or a manual run | **Everything**, always |
+| Pull request to `main` | Only what the changed files affect (below) |
+| Pull request changing only docs (`docs/`, `*.md`, images) | Nothing: the three build jobs are skipped |
+
+For pull requests, a first job (*Decide what to test*) maps the changed files
+to the tests that exercise them:
+
+| Changed files | Tests run |
+|---------------|-----------|
+| `src/common`, `src/core`, `src/csv`, the writer, `bdb_format.h`, `io`, `memory`, any `CMakeLists.txt`, `tests/test_util.h`, the workflow | all four |
+| `src/storage/bdb_reader.*` | round trip, aggregates, corrupt |
+| `src/executor/**` | round trip, aggregates |
+| `tests/test_<name>.c` | that test |
+| `main.c`, `src/storage/debug.*` | none (build only) |
+
 To make the checks required before merging, enable branch protection for
-`main` (**Settings → Branches**) and mark the three jobs as required.
+`main` (**Settings → Branches**) and mark the three build jobs as required.
+A skipped job counts as passing, so docs-only pull requests can still be
+merged.
+
+When a new test is added, add a step for it to each job in `ci.yml`, and map
+it to the source folders it exercises in the *Decide what to test* job.
 
 ## Usage
 
