@@ -1,5 +1,15 @@
+# CodeQL configuration for BulletDB (used by .github/workflows/codeql.yml).
+
+# The tests create throwaway CSV and .bdb files in the build directory and
+# compare results exactly on purpose; findings there aren't actionable.
+paths-ignore:
+  - tests
+
 query-filters:
   - exclude:
-      # Exact float comparison is intended: SQL "=" compares stored values
-      # exactly, and the tests check bit-identical round trips.
+      # Exact floating-point comparison is intended. SQL's "=" compares stored
+      # values exactly (as PostgreSQL, SQLite and DuckDB do): an epsilon would
+      # make "= x" and "!= x" overlap and equality non-transitive. Both the
+      # stored values and query constants come from the same strtod, so equal
+      # text gives bit-identical doubles.
       id: cpp/equality-on-floats
