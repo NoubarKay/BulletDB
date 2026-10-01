@@ -42,13 +42,15 @@ DuckDB and Parquet.
 - **A streaming reader** that holds only the footer and one chunk in memory,
   whatever the file size
 - **A vectorized query executor** (Volcano model, one chunk per call):
-  `SCAN` → `AGGREGATE` with `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`
+  `SCAN` → `FILTER` → `AGGREGATE`, with `WHERE column op value` on `INT` and
+  `DOUBLE` columns (selection vectors, no copying), and `SUM`, `COUNT`,
+  `MIN`, `MAX`, `AVG`
 - **`EXPLAIN`-style plans** with per-operator statistics (calls, chunks, rows,
   time)
 - **Tests and CI** on Linux, Linux with sanitizers, and Windows
 
-Next up: a `FILTER` operator with selection vectors, then per-group statistics
-and zone-map pruning. See the [roadmap](docs/ROADMAP.md).
+Next up: per-group statistics (format v2) and zone-map pruning, so a filter
+can skip whole row groups. See the [roadmap](docs/ROADMAP.md).
 
 ## Quick start
 

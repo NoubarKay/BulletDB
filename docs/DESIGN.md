@@ -9,10 +9,10 @@ This document describes how BulletDB is built today: the data model, the
   **writer and reader are built**, and the storage round trip (CSV → `.bdb` →
   chunks) gives back every value exactly.
 - Part 3, [Query execution](#part-3-query-execution), covers the executor: a
-  tree of operators passing chunks to each other. **`SCAN` and `AGGREGATE`
-  (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`) work**, together with a plan printer
-  and per-operator stats and timing (D1–D3). The optimizer design (zone maps,
-  per-operator optimization passes) and `FILTER` are next.
+  tree of operators passing chunks to each other. **`SCAN`, `FILTER` (with
+  selection vectors) and `AGGREGATE` (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`)
+  work**, together with a plan printer and per-operator stats and timing
+  (D1–D3). Per-group statistics and zone-map pruning (format v2) are next.
 
 This document covers the structure of the engine and the reasons behind it.
 Running it is in [USAGE.md](USAGE.md), tests and CI in
@@ -46,6 +46,7 @@ Running it is in [USAGE.md](USAGE.md), tests and CI in
   - [The base operator](#the-base-operator)
   - [Scan](#scan)
   - [Aggregate](#aggregate)
+  - [Filter](#filter)
   - [Streaming operators and pipeline breakers](#streaming-operators-and-pipeline-breakers)
   - [Explain and the execution debugger](#explain-and-the-execution-debugger)
   - [Next steps](#next-steps)
@@ -150,6 +151,7 @@ typedef struct {
     uint64_t count;       // rows filled, 0..BDB_VECTOR_SIZE
     uint64_t col_count;
     COLUMN  *columns;
+    const uint16_t *sel_vector;   // NULL = rows 0..count-1; see "Selection vectors"
 } CHUNK;
 ```
 
@@ -178,6 +180,34 @@ CHUNK  count = 3            (capacity 2048)
 │ bitmap: 1 1 1    │ bitmap: 1 0 1    │ bitmap: 1 1 1    │
 └──────────────────┴──────────────────┴──────────────────┘
 ```
+
+### Selection vectors
+
+A chunk can point at **some** of its rows instead of all of them. When
+`sel_vector` is `NULL`, the chunk's rows are `0..count-1`. Otherwise
+`sel_vector[0..count-1]` holds the **physical** row numbers that belong to the
+chunk, and `count` is how many there are:
+
+```
+columns (shared, not copied):   qty: 10  20  NULL  40  50  60
+                                     0   1   2     3   4   5
+FILTER qty >= 40 returns:       count = 3, sel_vector = {3, 4, 5}
+```
+
+This is how `FILTER` avoids copying (see [Filter](#filter)). The rule for
+every consumer is the same: display or loop index `i`, physical row
+`k = sel_vector ? sel_vector[i] : i`, and read `data[k]` and `bitmap[k]`.
+
+| Consumer | With a selection vector |
+|----------|-------------------------|
+| `AGGREGATE` | follows it |
+| `FILTER` | follows its input's, and writes physical rows into its own |
+| `print_table` | follows it (`TABLE.sel_vector`, set by `print_chunk_cb`) |
+| `bdb_writer_append` | **rejects** the chunk with `BDB_ERR_INVALID`: it copies rows `0..count-1` as one block, so it would save the wrong rows |
+
+`sel_vector` belongs to whoever produced the chunk and, like the chunk, is
+only valid until that producer's next `next` call. `chunk_reset` and
+`chunk_free` set it back to `NULL`.
 
 ## The pull model
 
@@ -365,7 +395,8 @@ All of that has since been replaced and deleted (git history keeps it):
 | int64 `.bdb` writer and reader | `BDB_WRITER` and `BDB_READER` (Part 2) |
 | `query/query.c` (`bdb_run_query` on a `TABLE`) | the executor (Part 3) |
 
-`TABLE` itself remains only as a view for `print_table`.
+`TABLE` itself remains only as a view for `print_table`: `print_chunk_cb` in
+`main.c` fills one from a chunk's `count`, `columns` and `sel_vector`.
 
 ---
 
@@ -1034,6 +1065,62 @@ Verified: `SUM` of every column of the 225,721-row test file matches the sums
 computed directly from the CSV, and `COUNT`, `MIN`, `MAX`, `AVG` and the NULL
 cases were checked by hand.
 
+## Filter
+
+`executor/filter.c`. `WHERE column op value`: a streaming operator that keeps
+the rows of each chunk that match one comparison against a number.
+
+```c
+typedef enum { BDB_COMPARE_EQ, BDB_COMPARE_NE, BDB_COMPARE_LT,
+               BDB_COMPARE_LE, BDB_COMPARE_GT, BDB_COMPARE_GE } BdbCompareOp;
+
+typedef struct {
+    BdbOperator      base;
+    const char      *column_name;
+    BdbCompareOp     op;
+    uint64_t         column;          // its index, found in the first chunk
+    bool             found_column;
+    enum ColumnType  col_type;
+    const char      *value;           // the constant as given, for describe
+    double           number;          // the same constant, parsed once
+    uint16_t         sel[BDB_VECTOR_SIZE];   // the selection it returns
+    CHUNK            out_chunk;       // borrows the child's columns
+} BdbFilter;
+
+bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GE, "45");
+```
+
+How `next` works:
+
+1. Pull one chunk from the child. On the first chunk, find the column by name
+   (`BDB_ERR_NOT_FOUND` if it isn't there). Only `INT` and `DOUBLE` columns
+   can be filtered (`BDB_ERR_INVALID` otherwise).
+2. Loop over the chunk's rows, following its `sel_vector` if it has one, and
+   write the physical row number of each match into `filter->sel`.
+3. Return `out_chunk`: the **child's own columns**, `count` = the number of
+   matches, `sel_vector = filter->sel`. Nothing is copied.
+
+Details:
+
+- **NULL never matches,** not even `!=`, as in SQL. So `qty = 40` and
+  `qty != 40` together cover every non-NULL row, not every row.
+- **No matches gives an empty chunk.** When nothing in a chunk matches, the
+  filter returns `count = 0` instead of pulling again. Consumers skip it:
+  the aggregate adds nothing, and `main.c` doesn't print it.
+- **Filters stack.** A second filter receives an already-selected chunk,
+  follows its selection, and stores physical rows, so two filters make an
+  `AND`.
+- **Branchless loop.** The loop writes every candidate row into
+  `sel[matches]` and then adds `bitmap[k] != 0 & (v[k] op x)` to `matches`,
+  so there's no branch for the CPU to mispredict. A non-match is overwritten
+  by the next row. `FILTER_LOOP` and `FILTER_OPS` generate one loop per type
+  and comparison, so the comparison is chosen once per chunk, not per row.
+- **The constant is parsed once,** with `strtod` in `bdb_filter_init`. Two
+  known gaps come from that (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)): a
+  fractional constant on an `INT` column, and integer constants above 2⁵³.
+- `describe` prints `FILTER QUANTITYORDERED >= 45`, followed by the same
+  statistics as the other operators after a run.
+
 ## Streaming operators and pipeline breakers
 
 Operators fall into two groups:
@@ -1082,14 +1169,9 @@ scattered through every operator.
 the first few rows of each chunk for operators marked for tracing, without
 touching any operator's own code.
 
-**Step 5: `FILTER`** (`WHERE column op value`), a streaming operator between
-the scan and the aggregate. For each chunk it keeps only the matching rows.
-The first version copies them into its own chunk; the faster version (X100,
-DuckDB) passes a **selection vector** (the positions of the matching rows)
-instead of copying. If a whole chunk matches nothing, the filter keeps
-pulling until it has at least one row or its child is finished, so it never
-returns an empty chunk. The aggregate doesn't change: it just gets its
-chunks from the filter instead of the scan.
+**Zone maps (v0.2).** Per-group `min`/`max` in the footer (format v2), so the
+scan can skip whole row groups that a filter can't match. See
+[Optimizer](#optimizer).
 
 ## Optimizer
 
@@ -1154,7 +1236,7 @@ and **expression-level** tricks on top.
 | E3 | Operator "classes" | **Base struct as first field + function pointers** | Callers work with any operator; adding one needs no central `switch` |
 | E4 | Who closes the child | **Each operator closes its child** | `main` closes only the top operator |
 | E5 | Finding columns | **By name, in the first chunk received** | Works with any child; no schema needed on `BdbOperator` |
-| E6 | Filter output | **Copy matching rows first; selection vectors later** | Simpler to get right; switch once the engine works |
+| E6 | Filter output | **Selection vectors** over the child's columns; an empty chunk (`count = 0`) when nothing matches | No copying; the planned copy-first version was skipped |
 | E7 | Aggregate kinds | **One operator; one loop updates count, sum, min and max; the result picks one** | Adding an aggregate doesn't touch the loop; costs a few comparisons per row |
 | E8 | Aggregate result types | **COUNT → INT, AVG → DOUBLE, SUM/MIN/MAX → the column's type**; NULL when there are no values (COUNT: 0) | Matches SQL |
 
@@ -1164,8 +1246,8 @@ and **expression-level** tricks on top.
 
 Roughly in order, once v1 works end to end:
 
-1. **Finish the executor basics** (Part 3, Next steps): the execution
-   debugger and `FILTER`.
+1. **Finish the executor basics** (Part 3, Next steps): tracing (D4) in the
+   execution debugger. (`FILTER` is done.)
 2. **Column projection.** The reader loads only the columns a query uses.
 3. **v2: row-group statistics.** Add per-column per-group stats to the footer,
    stored alongside each group's existing `offset`:

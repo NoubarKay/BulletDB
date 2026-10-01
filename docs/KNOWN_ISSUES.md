@@ -15,8 +15,16 @@ Things that don't exist yet, or work in a restricted way, by design for now.
 - **Only an empty field is NULL.** Text like `NULL` or `NA` is read as text,
   so in a number column it fails the import.
 - **No strings yet.** A `STR` column fails the import.
-- **Queries are hard-coded in `main.c`:** one aggregate of one column. There's
-  no `WHERE`, no `GROUP BY`, and no SQL text yet.
+- **Queries are hard-coded in `main.c`:** operator trees built in C. There's
+  no `GROUP BY` and no SQL text yet.
+- **`FILTER` is one comparison of a column against a number.** Only `INT`
+  and `DOUBLE` columns; no `OR`, no column-to-column comparisons. Several
+  conditions combine with `AND` by stacking filters.
+- **Filtered chunks can't be written to a `.bdb` file.** `bdb_writer_append`
+  rejects a chunk with a selection vector rather than copying the selected
+  rows.
+- **Printed row numbers restart in every chunk.** A chunk doesn't know where
+  it sits in the file.
 - **Aggregates only work on `INT` and `DOUBLE` columns.** A `BOOL` column is
   rejected, even for `COUNT`.
 - **The reader always reads every column.** Reading only the columns a query
