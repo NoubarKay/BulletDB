@@ -1,0 +1,115 @@
+name: Release
+
+# Pushing a version tag (for example v0.2.0) runs the tests, builds the
+# program for Linux and Windows, and publishes a GitHub Release with the
+# binaries attached and the matching CHANGELOG.md section as its notes.
+# If any test fails, nothing is published.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            binary: build/BulletDB
+          - name: windows-x86_64
+            os: windows-latest
+            binary: build/BulletDB.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        if: matrix.os == 'windows-latest'
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            zip
+
+      - name: Configure (Linux)
+        if: matrix.os != 'windows-latest'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
+
+      - name: Configure (Windows, statically linked so the .exe runs without MinGW)
+        if: matrix.os == 'windows-latest'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-static
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          dir="BulletDB-${version}-${{ matrix.name }}"
+          mkdir -p "$dir"
+          cp "${{ matrix.binary }}" "$dir/"
+          cp README.md CHANGELOG.md "$dir/"
+          if [ -f LICENSE ]; then cp LICENSE "$dir/"; fi
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            zip -rq "$dir.zip" "$dir"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            BulletDB-*.tar.gz
+            BulletDB-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          # The section for this version: from "## [0.2.0]" up to the next "## [".
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { inside = 1; next }
+            inside && index($0, "## [") == 1 { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG.md section found for ${version}." > notes.md
+          fi
+          cat notes.md
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: BulletDB ${{ github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true      # also lists the merged pull requests
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          files: dist/*

@@ -14,8 +14,9 @@ This document describes how BulletDB is built today: the data model, the
   and per-operator stats and timing (D1–D3). The optimizer design (zone maps,
   per-operator optimization passes) and `FILTER` are next.
 
-The README covers building, usage and the list of known bugs. This document
-covers the structure of the engine and the reasons behind it.
+This document covers the structure of the engine and the reasons behind it.
+Running it is in [USAGE.md](USAGE.md), tests and CI in
+[TESTING.md](TESTING.md), and known bugs in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Contents
 
@@ -257,8 +258,8 @@ after field 3:                               returns "true", then NULL
 ```
 
 No field is copied or allocated. That made the reader about 1.8 times faster
-than the earlier version, which copied every field (see the README's
-Performance section). Consequences:
+than the earlier version, which copied every field (see
+[PERFORMANCE.md](PERFORMANCE.md)). Consequences:
 
 - A line can only be split once, so type detection on the first row works on
   a `strdup` copy.
