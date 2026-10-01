@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include "csv_sniffer.h"
 #include "core/table.h"
@@ -80,18 +81,44 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
         column->bitmap[row] = is_null ? 0 : 1;
 
         switch (column->type) {
-            case BDB_COL_INT:
-                ((int64_t *)column->data)[row] = is_null ? 0 : (int64_t)strtoll(field, NULL, 10);
+            case BDB_COL_INT: {
+                char *end;
+                errno = 0;
+                int64_t ints = strtoll(field, &end, 10);
+                if ((end == field || *end != '\0' || errno == ERANGE) && !is_null)
+                    return bdb_error_set(err, BDB_ERR_PARSE,
+                                         "line %llu: '%s' is not a valid INT for column '%s'",
+                                         (unsigned long long)line_no, field, column->name);
+                ((int64_t *)column->data)[row] = ints;
                 break;
-            case BDB_COL_DOUBLE:
-                ((double *)column->data)[row] = is_null ? 0.0 : strtod(field, NULL);
+            }
+            case BDB_COL_DOUBLE:{
+                char *end;
+                errno = 0;
+                double doubles = strtod(field, &end);
+                if ((end == field || *end != '\0' || errno == ERANGE) && !is_null)
+                    return bdb_error_set(err, BDB_ERR_PARSE,
+                                         "line %llu: '%s' is not a valid DOUBLE for column '%s'",
+                                         (unsigned long long)line_no, field, column->name);
+                ((double *)column->data)[row] = doubles;
                 break;
-            case BDB_COL_BOOL:
-                // Accepts "true"/"t"/"yes"/"1" as true, anything else as false
-                ((bool *)column->data)[row] = !is_null &&
-                    (strcasecmp(field, "true") == 0 || strcasecmp(field, "t") == 0 ||
-                     strcasecmp(field, "yes") == 0  || strcmp(field, "1") == 0);
+            }
+            case BDB_COL_BOOL: {
+                bool value = false;
+                if (!is_null) {
+                    if (strcasecmp(field, "true") == 0 || strcasecmp(field, "t") == 0 ||
+                        strcasecmp(field, "yes") == 0  || strcmp(field, "1") == 0) {
+                        value = true;
+                        } else if (!(strcasecmp(field, "false") == 0 || strcasecmp(field, "f") == 0 ||
+                                     strcasecmp(field, "no") == 0    || strcmp(field, "0") == 0)) {
+                            return bdb_error_set(err, BDB_ERR_PARSE,
+                                                 "line %llu: '%s' is not a valid BOOL for column '%s'",
+                                                 (unsigned long long)line_no, field, column->name);
+                                     }
+                }
+                ((bool *)column->data)[row] = value;
                 break;
+            }
             default:
                 return bdb_error_set(err, BDB_ERR_PARSE,
                                      "line %llu: unsupported column type %d",
@@ -156,7 +183,8 @@ BdbStatus csv_open(CSV_READER *reader, const char *path, BdbError *err) {
     status = alloc_chunk_buffers(&reader->chunk, err);
     if (status != BDB_OK) return status;
 
-    bdb_fseek(reader->file, data_start, SEEK_SET);
+    if (bdb_fseek(reader->file, data_start, SEEK_SET) != 0)
+        return bdb_error_set(err, BDB_ERR_IO, "could not seek back to the first data row");
     reader->line_no = header_line;
 
     return status;
