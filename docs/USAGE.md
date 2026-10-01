@@ -24,7 +24,10 @@ One run does two things:
 1. **Import:** reads the CSV one chunk at a time and writes every chunk to
    **`test-1.bdb`** in the current directory.
 2. **Query:** builds a small operator tree over `test-1.bdb`, runs it, prints
-   the result, and then prints the plan with per-operator statistics.
+   the result, and then prints the plan with per-operator statistics. The
+   tree is whatever `main.c` builds (see
+   [Changing the query](#changing-the-query)); with an aggregate on top, the
+   output looks like this:
 
 ```text
 +----------------+
@@ -69,28 +72,62 @@ NULL values are skipped by all of them, as in SQL. They work on `INT` and
 `DOUBLE` columns. A column name that doesn't exist fails with
 `Column X not found`.
 
-## Printing chunks
+### Adding a WHERE
 
-`print_chunk_cb` in `main.c` prints any chunk as a table. In the import loop it
-shows the CSV data:
+A `FILTER` operator sits between the scan and whatever is above it, and keeps
+the rows where `column op value` is true:
+
+```c
+bdb_scan_open(&scan, "test-1.bdb", &err);
+bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GE, "45");
+bdb_aggregate_init(&agg, &filter.base, BDB_AGG_SUM, "PRICEEACH");
+BdbOperator *op = &agg.base;          // SUM(PRICEEACH) WHERE QUANTITYORDERED >= 45
+```
+
+- Comparisons: `BDB_COMPARE_EQ` (`=`), `NE` (`!=`), `LT` (`<`), `LE` (`<=`),
+  `GT` (`>`), `GE` (`>=`).
+- The column must be `INT` or `DOUBLE`, and the value is a number, given as
+  text (`"45"`, `"2.5"`).
+- A NULL never matches, not even `!=`.
+- Stack two filters for an `AND`: the second one's child is the first.
+- To see the matching rows instead of an aggregate, make the filter the top
+  operator (`op = &filter.base`) and print each chunk, skipping the empty
+  chunks it returns when nothing in a chunk matches. That's what `main.c`
+  does now.
 
 ```text
-+------+--------+-----------+
-| year | price  | expensive |
-| int  | double | bool      |
-+------+--------+-----------+
-| 2023 |  20.00 | true      |
-| 2024 |  20.00 | true      |
-| 2015 |   4.99 | false     |
+FILTER QUANTITYORDERED >= 45 calls: ...  chunks: ...  rows: ...  time: ... ms
+        +-SCAN (225721 rows, 5 columns, 2 groups)
+calls: 112  chunks: 111  rows: 225721  time: ... ms
+```
+
+## Printing chunks
+
+`print_chunk_cb` in `main.c` prints any chunk as a table, from the CSV
+reader, a scan, or a filter:
+
+```text
++------+------+--------+-----------+
+|    # | year | price  | expensive |
+|      | int  | double | bool      |
++------+------+--------+-----------+
+|    1 | 2023 |  20.00 | true      |
+|    2 | 2024 |   NULL | true      |
+|    3 | 2015 |   4.99 | false     |
 ...
-+------+--------+-----------+
+| 2048 | 2019 |  12.50 | true      |
++------+------+--------+-----------+
 (2048 rows, 3 columns)
 ```
 
-The printer (`print_table` in `core/table.c`) sizes each column to its longest
-name, type or value, right-aligns numbers, prints `NULL` for missing values and
-`true`/`false` for BOOL, and shows doubles with two decimals. A table longer
-than 20 rows shows only the first and last 10.
+The printer (`print_table` in `core/table.c`) numbers the rows from 1, sizes
+each column to its longest name, type or value, right-aligns numbers, prints
+`NULL` for missing values and `true`/`false` for BOOL, and shows doubles with
+two decimals. A table longer than 20 rows shows only the first and last 10.
+
+A filtered chunk prints only the rows the filter selected: the printer
+follows the chunk's selection vector. The row numbers count the printed rows
+(1, 2, 3…) and restart in every chunk.
 
 A chunk holds up to `BDB_VECTOR_SIZE` rows (2048, set in `src/core/chunk.h`).
 To see several chunks from a small CSV, lower it to something like 10.
