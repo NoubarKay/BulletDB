@@ -11,11 +11,11 @@
 #include "common/common.h"
 #include "core/chunk.h"
 
+
 typedef struct {
     FILE *file;
     char *buffer;
     uint64_t line_no;
-    bool have_types;
     CHUNK chunk;
 } CSV_READER;
 
