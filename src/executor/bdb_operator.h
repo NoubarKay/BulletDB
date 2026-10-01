@@ -23,7 +23,7 @@ struct BdbOperator{
     uint64_t stat_time_ns;
 };
 
-static BdbStatus bdb_op_next(BdbOperator *op, const CHUNK **out, BdbError *err) {
+static inline BdbStatus bdb_op_next(BdbOperator *op, const CHUNK **out, BdbError *err) {
     op->stat_calls++;
     uint64_t start = bdb_now();
     BdbStatus s = op->next(op, out, err);

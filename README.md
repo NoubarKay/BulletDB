@@ -1,4 +1,9 @@
-# BulletDB
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/bulletdb-lockup-white-red.png">
+    <img src="docs/bulletdb-lockup.png" alt="BulletDB" width="420">
+  </picture>
+</p>
 
 > [!WARNING]
 > **v0.2 is currently in active development — this is NOT PRODUCTION READY.**
