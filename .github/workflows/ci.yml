@@ -37,10 +37,10 @@ jobs:
       aggregates: ${{ steps.decide.outputs.aggregates }}
       corrupt:    ${{ steps.decide.outputs.corrupt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -108,7 +108,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
@@ -146,7 +146,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc -DBDB_SANITIZE=ON
@@ -183,7 +183,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: msys2/setup-msys2@v2
         with:
