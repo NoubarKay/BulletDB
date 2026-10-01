@@ -148,17 +148,27 @@ year,price,expensive
 
 Rules:
 - The first line is the header and holds the column names.
-- Each column's type is detected from its value in the **first data row**:
+- Each column's type is chosen from a **sample of the first 30,720 data
+  rows**: the narrowest type that fits every non-empty value in it.
 
-  | Value looks like | Type | Stored as |
-  |------------------|------|-----------|
-  | `true` `false` `t` `f` `yes` `no` (any case) | `BOOL` | `bool` |
-  | A whole number, such as `2023` | `INT` | `int64_t` |
-  | A decimal number, such as `20.00` | `DOUBLE` | `double` |
-  | Anything else | `STR` | not supported yet, so the import fails |
+  | Values in the sample | Type | Stored as |
+  |----------------------|------|-----------|
+  | Only `true` `false` `t` `f` `yes` `no` `1` `0` (any case) | `BOOL` | `bool` |
+  | Whole numbers, such as `2023` | `INT` | `int64_t` |
+  | Any decimal, such as `20.00`, or an integer too big for `int64_t` | `DOUBLE` | `double` |
+  | Empty in every sampled row | `DOUBLE` | `double` |
+  | Any other text, or bool words mixed with numbers | `STR` | not supported yet, so the import fails |
+
+  A column of `1, 2, 2765.9` is `DOUBLE`, wherever in the sample the decimal
+  appears.
+- Every value after the sample must fit its column's type. One that doesn't
+  (`2.5` in an `INT` column, `maybe` in a `BOOL` column, an integer that
+  overflows `int64_t`) stops the import with an error naming the line. It's
+  never truncated or replaced.
 
 - An empty field (`2024,,true`) is stored as **NULL** in every column type.
-  Only an empty field is NULL: text like `NULL` or `NA` is read as a value.
+  Only an empty field is NULL: text like `NULL` or `NA` is read as text, so
+  in a number column it fails the import.
 - Spaces around a value are ignored (`2023, 20.00 ,true` works).
 - Each row must have exactly one value per column. A trailing comma
   (`2025,50.00,true,`) counts as an extra, empty value, so it's an error.
@@ -172,6 +182,8 @@ Errors name the line:
 error: line 7: expected 3 values, got 2
 error: line 9: more values than the 3 columns in the header
 error: line 12: value in column 'price' is longer than 255 characters
+error: line 31222: '2.5' is not a valid INT for column 'year'
+error: column 'status' contains text; text columns aren't supported yet
 ```
 
 How lines are split into fields, in place and without allocating, is described

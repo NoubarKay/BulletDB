@@ -27,8 +27,19 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
   on every target, with a missing `return` as a build error.
 - Logo (light and dark versions) and status badges in the README.
 - `CHANGELOG.md`.
+- CSV type sniffer (`csv_sniffer.c`): column types are chosen from a sample
+  of up to 30,720 data rows, promoting `BOOL` → `INT` → `DOUBLE` as needed.
+  A column that's empty in every sampled row is `DOUBLE`.
+- `test_csv_types`: the sniffer's choices, and bad values after the sample
+  rejected with their exact line.
 
 ### Changed
+- CSV values are validated against their column's type on every row. A value
+  that doesn't fit (`2.5` or `abc` in an `INT` column, `maybe` in a `BOOL`
+  column, an integer that overflows `int64_t`) stops the import with an error
+  naming the line, the value and the column.
+- Text in a sampled column is reported by column name
+  (`column 'X' contains text`).
 - The engine is now built as a static library, `bulletdb`, linked by the
   program and the tests.
 - Minimum CMake version lowered from 4.3 to 3.21.
@@ -38,6 +49,11 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
 
 ### Fixed
 - Aggregate result types and names (`COUNT` is INT, `AVG` is DOUBLE).
+- A column whose first value was a whole number silently truncated later
+  decimals (`2765.9` → `2765`). Non-numbers were stored as `0`, unknown
+  `BOOL` text as `false`, and overflowing integers as `INT64_MAX`.
+- An empty value in the first data row no longer fails the import.
+- `csv_open` now checks the header parse and the file seek.
 
 ### Removed
 - Sample data (`sales.csv`, `test.bdb`) and IDE settings (`.idea/`) from the

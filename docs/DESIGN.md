@@ -102,7 +102,7 @@ All paths are under `src/`, which is the include root: code writes
 |-------|-------|-----|
 | Common | `common/common.c` | `BdbStatus`, `BdbError` |
 | Core | `core/chunk.c`, `core/table.c` | `COLUMN`, `CHUNK`, `TABLE`, types, `print_table`. `chunk.h` defines `BDB_VECTOR_SIZE` and `BDB_ROW_GROUP_SIZE` |
-| CSV | `csv/csv_tokenize.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); header, type detection, lines → chunks. `csv_tokenize.h` holds the CSV limits |
+| CSV | `csv/csv_tokenize.c`, `csv/csv_sniffer.c`, `csv/csv_reader.c` | Read a line, split fields (`next_field`); sniff column types from a sample (`csv_sniff`); header, strict value parsing, lines → chunks. `csv_tokenize.h` holds the CSV limits, `csv_sniffer.h` the sample size |
 | Storage | `storage/bdb_writer.c`, `storage/bdb_reader.c`, `storage/bdb_format.h` | Chunks → `.bdb` file, and `.bdb` file → chunks again (footer loaded once, data streamed). `bdb_format.h` holds the magic, version and file limits |
 | Storage helpers | `storage/memory.c`, `storage/io.c`, `storage/debug.c`, `storage/io.h` | `GROW_CAPACITY` / `GROW_ARRAY`, a checked `fread` helper, `bdb_writer_debug_dump` / `bdb_reader_debug_dump`. `io.h` also provides `bdb_fseek`, `bdb_ftell` (64-bit seek/tell, wrapping `_fseeki64`/`_ftelli64` on Windows and `fseeko`/`ftello` on POSIX) and `bdb_now` (monotonic nanosecond clock, wrapping `QueryPerformanceCounter` on Windows and `clock_gettime(CLOCK_MONOTONIC)` on POSIX) |
 | Executor | `executor/bdb_operator.h`, `executor/scan.c`, `executor/aggregate.c`, `executor/explain.c` | The operator tree that runs queries on chunks (Part 3) |
@@ -218,7 +218,6 @@ typedef struct {
     FILE    *file;
     char    *buffer;       // one line, up to BDB_CSV_MAX_LINE bytes
     uint64_t line_no;      // for error messages
-    bool     have_types;   // set once the first data row has fixed the types
     CHUNK    chunk;        // reused for every chunk
 } CSV_READER;
 ```
@@ -228,16 +227,18 @@ typedef struct {
 ```
 csv_open
   ├─ fopen, allocate the line buffer
-  └─ read line 1 → parse_header → one COLUMN per name (data and bitmap NULL)
+  ├─ read line 1 → parse_header → one COLUMN per name (data and bitmap NULL)
+  ├─ remember the position and line number after the header
+  ├─ csv_sniff               → read up to BDB_CSV_SAMPLE_ROWS rows, set each column's type
+  ├─ allocate data and bitmap for each column (2048 slots, sized by its type)
+  └─ seek back to the first data row, restore line_no
 
 csv_next_chunk  (called repeatedly)
   ├─ chunk_reset
   └─ loop until the chunk is full or the file ends:
        read_next_line          (EOF → stop)
        blank line?             → skip
-       first data row?         → detect types on a copy of the line,
-                                 allocate data and bitmap for each column
-       parse_row               → store values at [chunk.count]
+       parse_row               → check and store values at [chunk.count]
        chunk.count++
   → *out = chunk, or NULL if no rows were read
 
@@ -261,24 +262,67 @@ No field is copied or allocated. That made the reader about 1.8 times faster
 than the earlier version, which copied every field (see
 [PERFORMANCE.md](PERFORMANCE.md)). Consequences:
 
-- A line can only be split once, so type detection on the first row works on
-  a `strdup` copy.
+- A line can only be split once. The sniffer and the reader each read the
+  sampled lines themselves (the reader after seeking back), so no line is
+  ever copied.
 - A field pointer is only valid until the next line is read. Numbers and BOOL
   values are converted immediately. Strings, once they exist, must be copied.
 
 ### Type detection
 
-Types are fixed by the **first data row**:
+Types are decided **before** any row is stored, in two steps: the sniffer
+picks one type per column from a sample, and the reader then enforces it on
+every row. This is the same split DuckDB's CSV reader uses.
 
-| Value | Type |
+**1. Sniff (`csv_sniff`).** The sniffer reads up to `BDB_CSV_SAMPLE_ROWS`
+(30,720) data rows and keeps one state per column. Each non-empty value is
+classified on its own:
+
+| Value | Kind |
 |-------|------|
-| `true` `false` `t` `f` `yes` `no` (any case) | `BOOL` |
-| Parses fully as an integer | `INT` |
-| Parses fully as a decimal | `DOUBLE` |
-| Anything else, including empty | `STR`, which fails the import |
+| `true` `false` `t` `f` `yes` `no` (any case) | `BOOL`, and a *bool word* |
+| `0` or `1` | `BOOL` (could also be an `INT`) |
+| Parses fully as an `int64_t`, no overflow | `INT` |
+| Parses fully as a decimal (including integers too big for `int64_t`) | `DOUBLE` |
+| Anything else | `STR` |
 
-Later rows aren't checked against these types. Improving this is on the
-roadmap.
+The kinds are ordered `UNKNOWN < BOOL < INT < DOUBLE < STR`, and a column
+takes the **largest** kind it has seen, so it only ever moves up:
+`1, 0, 30, 2.5` ends as `DOUBLE`. One exception: once a column has seen a
+bool word, it can't become a number (`yes, 5` is `STR`). Empty values don't
+vote. At the end of the sample:
+
+| Column state | Type |
+|--------------|------|
+| `BOOL` / `INT` / `DOUBLE` | that type |
+| `UNKNOWN` (empty in every sampled row) | `DOUBLE`, the most permissive number type |
+| `STR` | error: `column 'X' contains text; text columns aren't supported yet` |
+
+The sniffer also checks the number of values per row, so a malformed row in
+the sample fails before anything is imported.
+
+**2. Parse strictly (`parse_row`).** Every non-empty value must fully parse
+as its column's type: `strtoll` without overflow for `INT`, `strtod` for
+`DOUBLE`, one of `true` `false` `t` `f` `yes` `no` `1` `0` for `BOOL`.
+Anything else stops the import:
+
+```text
+error: line 31222: '2.5' is not a valid INT for column 'qty'
+```
+
+So a value outside the sample that doesn't fit its column is an error, never
+a silent truncation (`2.5` → `2`) or substitution (`abc` → `0`,
+`maybe` → `false`).
+
+**Why `INT` is always `int64_t`.** Choosing `INT8`/`16`/`32` from the sample
+would fail on columns whose values grow past the sampled range (IDs,
+timestamps, running totals), and every operator would need one code path per
+width. Space will instead be saved in storage: in format v2 the writer picks
+the narrowest width per row group, when the whole group's min and max are
+known, and the reader widens it back to `int64_t`.
+
+**Trade-off.** The sampled rows are read twice, and the input must be
+seekable (a regular file, not a pipe).
 
 ### Row rules
 
@@ -296,8 +340,8 @@ roadmap.
 | Line buffer | `csv_open` | `csv_close` |
 | `chunk.columns` array | `parse_header` (`realloc` per column) | `chunk_free` |
 | Each column's `name` | `parse_header` (`strdup`) | `chunk_free` |
-| Each column's `data` and `bitmap` | first data row (`calloc`, 2048 slots) | `chunk_free` |
-| Copy of the first row | `csv_next_chunk` (`strdup`) | `csv_next_chunk`, right away |
+| Each column's `data` and `bitmap` | `csv_open`, after sniffing (`calloc`, 2048 slots) | `chunk_free` |
+| Sniffer state (one per column) | `csv_sniff` (`calloc`) | `csv_sniff`, before it returns |
 | The `CSV_READER` struct itself | the caller (usually on the stack) | the caller |
 
 `chunk_free` sets the pointers to `NULL` and the counts to 0, so calling it

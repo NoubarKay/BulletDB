@@ -40,12 +40,12 @@ Built one operator at a time (design in
 - [ ] Pack NULL bitmaps into 1 bit per row, stored as `uint64_t` words
       (32 words per 2048-row chunk)
 - [ ] Strings, stored with a dictionary
-- [ ] Narrower integer types (`INT8`/`16`/`32`) and column compression
-      (run-length, delta, dictionary, frame-of-reference + bit-packing)
-- [ ] CSV type inference over the whole first chunk instead of one row, with
-      an optional user-supplied schema
-- [ ] CSV import hardening: validate every value against its column type,
-      reject invalid `BOOL` values, detect integer overflow
+- [ ] Narrower integer storage, chosen per row group by the writer from the
+      group's min and max (`INT` stays `int64_t` in memory and in queries),
+      then column compression (run-length, delta, dictionary,
+      frame-of-reference + bit-packing)
+- [ ] CSV: an optional user-supplied schema, and an option to skip or log
+      rows that don't fit their column's type
 - [ ] Importing from SQL databases (SQLite, then PostgreSQL) as another chunk
       source
 - [ ] Command-line subcommands such as `import`, `query` and `info`
@@ -54,6 +54,9 @@ Built one operator at a time (design in
 ## Done
 
 - [x] CSV import with line-level error messages
+- [x] CSV type sniffing over a 30,720-row sample (`BOOL` → `INT` →
+      `DOUBLE`), and strict validation of every value against its column
+      type (no silent truncation, invalid `BOOL`s or integer overflow)
 - [x] Typed columns (`INT`, `DOUBLE`, `BOOL`) with NULL bitmaps
 - [x] Pull-based CSV reader that streams fixed-size chunks
 - [x] In-place CSV field splitting (1.8 times faster, no allocations per field)

@@ -1,13 +1,23 @@
+#include "csv/csv_sniffer.h"
+
+#include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common/common.h"
 #include "core/chunk.h"
-#include "csv/csv_sniffer.h"
+#include "csv/csv_tokenize.h"
 
-#include <string.h>
-#include <errno.h>
-#include "csv_tokenize.h"
+// Candidate types in promotion order: a column only ever moves to a larger
+// value, so merging a value into a column is a max().
+typedef enum { SNIFF_UNKNOWN = 0, SNIFF_BOOL, SNIFF_INT, SNIFF_DOUBLE, SNIFF_STR } SniffType;
+
+typedef struct {
+    SniffType type;         // SNIFF_UNKNOWN until the first non-empty value
+    bool saw_bool_word;     // true/false/t/f/yes/no seen → can't become INT
+} SniffState;
 
 #define MAX_STATE(type, column) ((type) > (column) ? (type) : (column))
 
@@ -29,7 +39,7 @@ static SniffType kind_of(const char *field, bool *is_bool_word) {
     return SNIFF_STR;
 }
 
-void sniff_value(SniffState *s, const char *field) {
+static void sniff_value(SniffState *s, const char *field) {
     bool is_bool_word;
     SniffType type = kind_of(field, &is_bool_word);
     if (is_bool_word) s->saw_bool_word = true;
