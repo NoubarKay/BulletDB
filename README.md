@@ -5,6 +5,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <em>A personal learning project: a columnar database engine built from scratch, one step at a time.<br>
+  Issues and discussion are welcome; pull requests may not be accepted.</em>
+</p>
+
 > [!WARNING]
 > **v0.2 is currently in active development — this is NOT PRODUCTION READY.**
 > BulletDB is an early-stage research project. The file format, APIs and
