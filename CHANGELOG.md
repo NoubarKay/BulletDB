@@ -32,6 +32,7 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
   A column that's empty in every sampled row is `DOUBLE`.
 - `test_csv_types`: the sniffer's choices, and bad values after the sample
   rejected with their exact line.
+- Row numbers (starting at 1) in the table printer.
 
 ### Changed
 - CSV values are validated against their column's type on every row. A value
@@ -54,6 +55,10 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
   `BOOL` text as `false`, and overflowing integers as `INT64_MAX`.
 - An empty value in the first data row no longer fails the import.
 - `csv_open` now checks the header parse and the file seek.
+- Printing a filtered chunk showed its first rows instead of the rows the
+  filter selected. `print_table` now follows the selection vector, and
+  `bdb_writer_append` rejects a chunk with one instead of saving the wrong
+  rows.
 
 ### Removed
 - Sample data (`sales.csv`, `test.bdb`) and IDE settings (`.idea/`) from the

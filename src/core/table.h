@@ -30,6 +30,7 @@ typedef struct {
     uint64_t col_count;
     uint32_t group_size;
     COLUMN* columns;
+    const uint16_t *sel_vector;
 } TABLE;
 
 // Size in bytes of one value of the given type, or 0 if the type is unknown.

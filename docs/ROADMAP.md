@@ -14,12 +14,12 @@ Built one operator at a time (design in
 - [x] `bdb_explain`: print the operator tree
 - [x] Per-operator statistics: `next` calls, chunks, rows and time (`bdb_op_next`)
 - [x] Test suite and CI
-- [ ] **`FILTER`** (`WHERE column op value`), with **selection vectors**:
-  - [ ] 5a. `sel` in `CHUNK`; the aggregate follows it (results unchanged)
-  - [ ] 5b. the filter struct (column, comparison, value, its own `sel` buffer)
-  - [ ] 5c. `filter_next`: build `sel` from the child's chunk, skipping NULLs
-  - [ ] 5d. `print_table` follows `sel`; the writer rejects selected chunks
-  - [ ] 5e. `test_filter`
+- [x] **`FILTER`** (`WHERE column op value`), with **selection vectors**:
+  - [x] 5a. `sel` in `CHUNK`; the aggregate follows it (results unchanged)
+  - [x] 5b. the filter struct (column, comparison, value, its own `sel` buffer)
+  - [x] 5c. `filter_next`: build `sel` from the child's chunk, skipping NULLs
+  - [x] 5d. `print_table` follows `sel`; the writer rejects selected chunks
+  - [x] 5e. `test_filter`
 - [ ] Tracing: print the rows leaving a chosen operator
 
 ## Next: format v2 and pruning

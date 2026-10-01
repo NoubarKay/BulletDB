@@ -76,7 +76,14 @@ static void format_cell(const COLUMN *column, uint64_t row, char *out, size_t n)
     }
 }
 
-static void print_border(const size_t *widths, uint64_t col_count) {
+static uint64_t physical_row(const TABLE *t, uint64_t i) {
+    return t->sel_vector ? t->sel_vector[i] : i;
+}
+
+// num_width is the width of the row-number column, printed before the others.
+static void print_border(size_t num_width, const size_t *widths, uint64_t col_count) {
+    putchar('+');
+    for (size_t i = 0; i < num_width + 2; i++) putchar('-');
     putchar('+');
     for (uint64_t col = 0; col < col_count; col++) {
         for (size_t i = 0; i < widths[col] + 2; i++) putchar('-');
@@ -85,12 +92,14 @@ static void print_border(const size_t *widths, uint64_t col_count) {
     putchar('\n');
 }
 
-static void print_row(const TABLE *table, const size_t *widths, uint64_t row) {
+// Prints the row number (1, 2, 3... in display order, also for a filtered
+// chunk), then every column's value.
+static void print_row(const TABLE *table, size_t num_width, const size_t *widths, uint64_t row) {
     char cell[PRINT_CELL_MAX];
-    putchar('|');
+    printf("| %*" PRIu64 " |", (int)num_width, row + 1);
     for (uint64_t col = 0; col < table->col_count; col++) {
         const COLUMN *column = &table->columns[col];
-        format_cell(column, row, cell, sizeof(cell));
+        format_cell(column, physical_row(table, row), cell, sizeof(cell));
         if (is_numeric(column->type)) {
             printf(" %*s |", (int)widths[col], cell);
         } else {
@@ -119,7 +128,18 @@ void print_table(TABLE *table) {
     }
 
     // Pass 1: each column is as wide as its longest name, type or shown value.
+    // The row-number column fits "#", the largest shown row number, and the
+    // "..." row if there is one.
     char cell[PRINT_CELL_MAX];
+    size_t num_width = strlen("#");
+    if (table->row_count > 2 * PRINT_EDGE_ROWS) num_width = strlen("...");
+    for (uint64_t row = 0; row < table->row_count; row++) {
+        if (!is_shown(table, row)) continue;
+        snprintf(cell, sizeof(cell), "%" PRIu64, row + 1);
+        size_t len = strlen(cell);
+        if (len > num_width) num_width = len;
+    }
+
     for (uint64_t col = 0; col < table->col_count; col++) {
         const COLUMN *column = &table->columns[col];
         size_t width = strlen(column->name);
@@ -128,7 +148,7 @@ void print_table(TABLE *table) {
 
         for (uint64_t row = 0; row < table->row_count; row++) {
             if (!is_shown(table, row)) continue;
-            format_cell(column, row, cell, sizeof(cell));
+            format_cell(column, physical_row(table, row), cell, sizeof(cell));
             size_t len = strlen(cell);
             if (len > width) width = len;
         }
@@ -136,26 +156,26 @@ void print_table(TABLE *table) {
     }
 
     // Pass 2: print.
-    print_border(widths, table->col_count);
+    print_border(num_width, widths, table->col_count);
 
-    putchar('|');
+    printf("| %*s |", (int)num_width, "#");
     for (uint64_t col = 0; col < table->col_count; col++) {
         printf(" %-*s |", (int)widths[col], table->columns[col].name);
     }
     putchar('\n');
 
-    putchar('|');
+    printf("| %*s |", (int)num_width, "");
     for (uint64_t col = 0; col < table->col_count; col++) {
         printf(" %-*s |", (int)widths[col], bdb_col_type_str(table->columns[col].type));
     }
     putchar('\n');
 
-    print_border(widths, table->col_count);
+    print_border(num_width, widths, table->col_count);
 
     for (uint64_t row = 0; row < table->row_count; row++) {
         if (!is_shown(table, row)) {
             if (row == PRINT_EDGE_ROWS) {
-                putchar('|');
+                printf("| %*s |", (int)num_width, "...");
                 for (uint64_t col = 0; col < table->col_count; col++) {
                     printf(" %-*s |", (int)widths[col], "...");
                 }
@@ -163,10 +183,10 @@ void print_table(TABLE *table) {
             }
             continue;
         }
-        print_row(table, widths, row);
+        print_row(table, num_width, widths, row);
     }
 
-    print_border(widths, table->col_count);
+    print_border(num_width, widths, table->col_count);
     printf("(%" PRIu64 " rows, %" PRIu64 " columns)\n", table->row_count, table->col_count);
 
     free(widths);

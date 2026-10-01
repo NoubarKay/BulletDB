@@ -112,6 +112,13 @@ BdbStatus bdb_writer_append(BDB_WRITER *w, const CHUNK *chunk, BdbError *err) {
     CHUNK *g = &w->group;
     BdbStatus status = BDB_OK;
 
+    // The copies below take rows 0..count-1 as one block, so a chunk whose
+    // rows are picked by a selection vector would save the wrong rows.
+    if (chunk->sel_vector != NULL) {
+        return bdb_error_set(err, BDB_ERR_INVALID,
+                             "can't write a chunk with a selection vector");
+    }
+
     if (!w->have_schema) {
         status = init_group(w, chunk, err);
         if (status != BDB_OK)
