@@ -15,6 +15,7 @@
 #include "executor/aggregate.h"
 #include "executor/scan.h"
 #include "executor/explain.h"
+#include "executor/filter.h"
 #include "storage/bdb_format.h"
 #include "storage/bdb_reader.h"
 #include "storage/bdb_writer.h"
@@ -39,8 +40,7 @@ int main(int argc, char *argv[]) {
     BdbError err = {0};
     CSV_READER csvReader = {0};
     BDB_WRITER writer = {0};
-    BdbScan scan;
-    BdbAggregate agg;
+    BdbScan scan; BdbFilter filter; BdbAggregate agg;
 
     const CHUNK *chunk;
     if (argc != 2 && argc != 3) {
@@ -81,7 +81,8 @@ int main(int argc, char *argv[]) {
 
 
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_aggregate_init(&agg, &scan.base, BDB_AGG_AVG, "PRICEEACH");
+    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_OP_GT, "50");
+    bdb_aggregate_init(&agg, &filter.base, BDB_AGG_COUNT, "QUANTITYORDERED");
     BdbOperator *op = &agg.base;
 
     while (status == BDB_OK && (status = bdb_op_next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
