@@ -30,6 +30,14 @@ Things that don't exist yet, or work in a restricted way, by design for now.
 Things that are broken right now, most serious first.
 
 **Crashes or wrong data**
+- [ ] `FILTER` with a fractional constant on an `INT` column drops the
+      fraction: `qty = 50.5` behaves like `qty = 50`, and `qty >= 50.5` like
+      `qty >= 50`. Fix by adjusting the comparison once per query (`=` →
+      no match, `!=` → every non-NULL row, `<`/`<=` → `<= floor(x)`,
+      `>`/`>=` → `>= ceil(x)`)
+- [ ] `FILTER` parses its constant as a `double`, so integer constants above
+      2⁵³ (about 9 × 10¹⁵) lose precision. Parse whole-number constants with
+      `strtoll` for `INT` columns
 - [ ] `bdb_now` (Windows) computes `counter × 1,000,000,000` before dividing,
       which overflows `int64_t` once the machine has been up for about 15
       minutes, so operator timings can be garbage. Split it into seconds and

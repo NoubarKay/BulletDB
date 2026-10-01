@@ -1,0 +1,5 @@
+query-filters:
+  - exclude:
+      # Exact float comparison is intended: SQL "=" compares stored values
+      # exactly, and the tests check bit-identical round trips.
+      id: cpp/equality-on-floats
