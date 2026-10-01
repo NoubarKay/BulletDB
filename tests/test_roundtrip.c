@@ -12,8 +12,7 @@
 
 #define ROWS ((uint64_t)2 * BDB_ROW_GROUP_SIZE + 1000)     // 3 row groups
 
-// The generator: what row i holds in each column. id is never NULL; the
-// first row has no NULLs, because column types are detected from it.
+// The generator: what row i holds in each column. id is never NULL.
 static bool    qty_null(uint64_t i)   { return i % 7  == 3; }
 static bool    price_null(uint64_t i) { return i % 11 == 5; }
 static bool    flag_null(uint64_t i)  { return i % 13 == 6; }

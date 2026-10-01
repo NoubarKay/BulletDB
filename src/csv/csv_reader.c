@@ -3,10 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
+#include "csv_sniffer.h"
 #include "core/table.h"
 #include "common/common.h"
 #include "csv/csv_tokenize.h"
+#include "storage/io.h"
 
 static BdbStatus parse_header(CHUNK* chunk, char *line, BdbError *err) {
     char *token = strtok(line, DELIMS);
@@ -39,56 +42,9 @@ static BdbStatus parse_header(CHUNK* chunk, char *line, BdbError *err) {
     return BDB_OK;
 }
 
-static enum ColumnType detect_file_type(const char *entry) {
-
-    // 2. Guard against an empty string after trimming
-    if (entry[0] == '\0') {
-        return BDB_COL_STR;
-    }
-
-    // Boolean Check
-    if (strcasecmp(entry, "true") == 0  || strcasecmp(entry, "false") == 0 ||
-        strcasecmp(entry, "t") == 0     || strcasecmp(entry, "f") == 0     ||
-        strcasecmp(entry, "yes") == 0   || strcasecmp(entry, "no") == 0) {
-        return BDB_COL_BOOL;
-        }
-
-    char *endptr;
-
-    // Integer Check (Passing 'str' instead of 'entry')
-    strtol(entry, &endptr, 10);
-    // Ensure endptr actually moved (endptr != str) and reached the end of the string
-    if (endptr != entry && *endptr == '\0') {
-        return BDB_COL_INT;
-    }
-
-    // Double Check (Passing 'str' instead of 'entry')
-    strtod(entry, &endptr);
-    // Ensure endptr actually moved (endptr != str) and reached the end of the string
-    if (endptr != entry && *endptr == '\0') {
-        return BDB_COL_DOUBLE;
-    }
-
-    return BDB_COL_STR;
-}
-
-static BdbStatus detect_types_allo_chunk_buffers(CHUNK* chunk, char *line, uint64_t line_no, BdbError *err) {
-    char *cursor = line;
+static BdbStatus alloc_chunk_buffers(CHUNK* chunk, BdbError *err) {
     for (uint64_t col = 0; col < chunk->col_count; col++) {
-        char *field = next_field(&cursor);
-        if (field == NULL) {
-            return bdb_error_set(err, BDB_ERR_PARSE,
-                                 "line %llu: expected %llu values, got %llu",
-                                 line_no, chunk->col_count, col);
-        }
 
-        if (strlen(field) > BDB_CSV_MAX_FIELD) {
-            return bdb_error_set(err, BDB_ERR_PARSE,
-                                 "line %llu: value in column '%s' is longer than %d characters",
-                                 line_no, chunk->columns[col].name, BDB_CSV_MAX_FIELD);
-        }
-
-        chunk->columns[col].type = detect_file_type(field);
         chunk->columns[col].data = calloc(BDB_VECTOR_SIZE, bdb_col_type_size(chunk->columns[col].type));
         chunk->columns[col].bitmap = calloc(BDB_VECTOR_SIZE,sizeof(char));
 
@@ -125,18 +81,44 @@ static BdbStatus parse_row(CHUNK *chunk, char *line, uint64_t row, uint64_t line
         column->bitmap[row] = is_null ? 0 : 1;
 
         switch (column->type) {
-            case BDB_COL_INT:
-                ((int64_t *)column->data)[row] = is_null ? 0 : (int64_t)strtoll(field, NULL, 10);
+            case BDB_COL_INT: {
+                char *end;
+                errno = 0;
+                int64_t ints = strtoll(field, &end, 10);
+                if ((end == field || *end != '\0' || errno == ERANGE) && !is_null)
+                    return bdb_error_set(err, BDB_ERR_PARSE,
+                                         "line %llu: '%s' is not a valid INT for column '%s'",
+                                         (unsigned long long)line_no, field, column->name);
+                ((int64_t *)column->data)[row] = ints;
                 break;
-            case BDB_COL_DOUBLE:
-                ((double *)column->data)[row] = is_null ? 0.0 : strtod(field, NULL);
+            }
+            case BDB_COL_DOUBLE:{
+                char *end;
+                errno = 0;
+                double doubles = strtod(field, &end);
+                if ((end == field || *end != '\0' || errno == ERANGE) && !is_null)
+                    return bdb_error_set(err, BDB_ERR_PARSE,
+                                         "line %llu: '%s' is not a valid DOUBLE for column '%s'",
+                                         (unsigned long long)line_no, field, column->name);
+                ((double *)column->data)[row] = doubles;
                 break;
-            case BDB_COL_BOOL:
-                // Accepts "true"/"t"/"yes"/"1" as true, anything else as false
-                ((bool *)column->data)[row] = !is_null &&
-                    (strcasecmp(field, "true") == 0 || strcasecmp(field, "t") == 0 ||
-                     strcasecmp(field, "yes") == 0  || strcmp(field, "1") == 0);
+            }
+            case BDB_COL_BOOL: {
+                bool value = false;
+                if (!is_null) {
+                    if (strcasecmp(field, "true") == 0 || strcasecmp(field, "t") == 0 ||
+                        strcasecmp(field, "yes") == 0  || strcmp(field, "1") == 0) {
+                        value = true;
+                        } else if (!(strcasecmp(field, "false") == 0 || strcasecmp(field, "f") == 0 ||
+                                     strcasecmp(field, "no") == 0    || strcmp(field, "0") == 0)) {
+                            return bdb_error_set(err, BDB_ERR_PARSE,
+                                                 "line %llu: '%s' is not a valid BOOL for column '%s'",
+                                                 (unsigned long long)line_no, field, column->name);
+                                     }
+                }
+                ((bool *)column->data)[row] = value;
                 break;
+            }
             default:
                 return bdb_error_set(err, BDB_ERR_PARSE,
                                      "line %llu: unsupported column type %d",
@@ -187,7 +169,24 @@ BdbStatus csv_open(CSV_READER *reader, const char *path, BdbError *err) {
     if (dest == NULL) {
         return bdb_error_set(err, BDB_ERR_PARSE, "line 1: header has no columns");
     }
-    parse_header(&reader->chunk, reader->buffer, err);
+
+    status = parse_header(&reader->chunk, reader->buffer, err);
+    if (status != BDB_OK) return status;
+
+    int64_t data_start = bdb_ftell(reader->file);
+    if (data_start < 0) return bdb_error_set(err, BDB_ERR_IO, "could not get position after the header");
+
+    uint64_t header_line = reader->line_no;
+    status = csv_sniff(reader->file, reader->buffer, &reader->chunk, &reader->line_no, err);
+    if (status != BDB_OK) return status;
+
+    status = alloc_chunk_buffers(&reader->chunk, err);
+    if (status != BDB_OK) return status;
+
+    if (bdb_fseek(reader->file, data_start, SEEK_SET) != 0)
+        return bdb_error_set(err, BDB_ERR_IO, "could not seek back to the first data row");
+    reader->line_no = header_line;
+
     return status;
 }
 
@@ -201,20 +200,6 @@ BdbStatus csv_next_chunk(CSV_READER *r, const CHUNK **out, BdbError *err) {
         if (status != BDB_OK) return status;
         if (line == NULL) break; // EOF
         if (line[0] == '\0') continue; // blank line
-
-        if (!r->have_types) {
-            // next_field cuts the line up in place, so detect types on a
-            // copy and leave the original for parse_row. Runs once per file.
-            char *copy = strdup(line);
-            if (copy == NULL) {
-                return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory copying line %llu",
-                                     r->line_no);
-            }
-            status = detect_types_allo_chunk_buffers(&r->chunk, copy, r->line_no, err);
-            free(copy);
-            if (status != BDB_OK) return status;
-            r->have_types = true;
-        }
 
         status = parse_row(&r->chunk, line, r->chunk.count, r->line_no, err);
         if (status != BDB_OK) return status;
@@ -231,6 +216,5 @@ void csv_close(CSV_READER *r) {
     free(r->buffer);
     r->file = NULL;
     r->buffer = NULL;
-    r->have_types = false;
     r->line_no = 0;
 }

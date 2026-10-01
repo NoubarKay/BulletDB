@@ -37,6 +37,7 @@ jobs:
       aggregates: ${{ steps.decide.outputs.aggregates }}
       corrupt:    ${{ steps.decide.outputs.corrupt }}
       filter:     ${{ steps.decide.outputs.filter }}
+      csv_types:  ${{ steps.decide.outputs.csv_types }}
     steps:
       - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
@@ -73,6 +74,7 @@ jobs:
             test_aggregates: ['tests/test_aggregates.c']
             test_corrupt:    ['tests/test_corrupt.c']
             test_filter:     ['tests/test_filter.c']
+            test_csv_types:  ['tests/test_csv_types.c']
 
       - name: Decide
         id: decide
@@ -94,6 +96,7 @@ jobs:
           #   aggregates - CSV import + writer + reader + executor
           #   corrupt    - writer + reader
           #   filter     - CSV import + writer + reader + executor
+          #   csv_types  - CSV import + writer + reader + executor
           {
             echo "code=$(any $all "$code")"
             echo "format=$(any $all "$every" '${{ steps.filter.outputs.test_format }}')"
@@ -101,6 +104,7 @@ jobs:
             echo "aggregates=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_aggregates }}')"
             echo "corrupt=$(any $all "$every" "$reader" '${{ steps.filter.outputs.test_corrupt }}')"
             echo "filter=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_filter }}')"
+            echo "csv_types=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_csv_types }}')"
           } | tee -a "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -140,6 +144,10 @@ jobs:
       - name: "Test: filter (WHERE, selection vectors)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.filter == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_filter$"
+
+      - name: "Test: CSV types (sniffer, strict parsing)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"
 
   # ---------------------------------------------------------------------------
   # Linux, GCC, AddressSanitizer + UndefinedBehaviorSanitizer
@@ -182,6 +190,10 @@ jobs:
       - name: "Test: filter (WHERE, selection vectors)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.filter == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_filter$"
+
+      - name: "Test: CSV types (sniffer, strict parsing)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"
 
   # ---------------------------------------------------------------------------
   # Windows, MSYS2 MinGW-w64, Release (the same kind of toolchain as CLion)
@@ -232,3 +244,7 @@ jobs:
       - name: "Test: filter (WHERE, selection vectors)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.filter == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_filter$"
+
+      - name: "Test: CSV types (sniffer, strict parsing)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"

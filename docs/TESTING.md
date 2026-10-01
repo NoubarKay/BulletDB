@@ -21,6 +21,7 @@ them together.
 | `test_aggregates` | `SUM`, `COUNT`, `MIN`, `MAX` and `AVG` on a small file with known answers: NULLs skipped, result types (`COUNT` is INT, `AVG` is DOUBLE), result names, and a missing column |
 | `test_corrupt` | Damaged files (wrong magic, unknown version, cut off, footer offset past the end, empty, too small) are rejected with `BDB_ERR_FORMAT`, never a crash |
 | `test_filter` | `FILTER` with selection vectors: all six comparisons on INT and DOUBLE columns, NULL never matching, complementary filters adding up, aggregates seeing only selected rows, two stacked filters, a filter matching nothing, error cases, and filters across 2 row groups where most chunks have no match |
+| `test_csv_types` | The CSV sniffer: `BOOL` → `INT` → `DOUBLE` promotion anywhere in the sample, NULLs not deciding a type, all-NULL columns as `DOUBLE`, the `int64_t` limits, and text, bool words mixed with numbers, or malformed rows rejected. Files longer than the sample: every row imported exactly once, and bad `INT`, `DOUBLE` and `BOOL` values after the sample rejected with their exact line |
 
 The tests write their CSV and `.bdb` files into the build directory, so they
 don't depend on any data file in the repository. Shared helpers (`CHECK`,

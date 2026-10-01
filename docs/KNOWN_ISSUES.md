@@ -4,12 +4,16 @@
 
 Things that don't exist yet, or work in a restricted way, by design for now.
 
-- **Types come from the first data row only.** A later value that doesn't fit
-  is stored wrongly instead of being rejected. For example, `abc` in an `INT`
-  column becomes `0`, and a column detected as `INT` from its first value
-  (`2871`) cuts later decimals (`2765.9` → `2765`).
-- **Only an empty field is NULL.** Text like `NULL` or `NA` is read as a value
-  (0 in a number column).
+- **Types come from a sample of 30,720 rows.** A value after the sample that
+  doesn't fit its column (a first decimal in an `INT` column, say) stops the
+  import with an error naming the line. There's no way yet to declare a
+  column's type, or to skip bad rows, to get past it.
+- **A column of only `0` and `1` in the sample is `BOOL`,** so `SUM`/`AVG`
+  reject it, and a later `2` is an error.
+- **CSV input must be a seekable file.** The reader seeks back after
+  sniffing, so a pipe or stdin won't work.
+- **Only an empty field is NULL.** Text like `NULL` or `NA` is read as text,
+  so in a number column it fails the import.
 - **No strings yet.** A `STR` column fails the import.
 - **Queries are hard-coded in `main.c`:** one aggregate of one column. There's
   no `WHERE`, no `GROUP BY`, and no SQL text yet.
@@ -45,9 +49,6 @@ Things that are broken right now, most serious first.
 - [ ] The aggregate's "invalid column type" error message passes the
       aggregate's name (a string) to a `%d`, so the message is wrong (and
       it's undefined behavior). It should be `%s`
-- [ ] `csv_open` ignores the status returned by `parse_header`
-- [ ] An empty value in the first data row fails the import:
-      `detect_file_type("")` returns `STR`, which is rejected
 - [ ] A CSV with a header but no data rows writes a `.bdb` footer with 0
       columns: the writer only learns the schema from the first chunk
 - [ ] `bdb_write_group` doesn't check `bdb_ftell` for failure (-1) before

@@ -41,6 +41,8 @@ add_library(bulletdb STATIC
         src/executor/explain.c
         src/executor/filter.h
         src/executor/filter.c
+        src/csv/csv_sniffer.h
+        src/csv/csv_sniffer.c
 )
 # Include paths are relative to src/, e.g. #include "core/chunk.h"
 target_include_directories(bulletdb PUBLIC src)
