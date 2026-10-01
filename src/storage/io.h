@@ -31,4 +31,16 @@ static inline uint64_t bdb_now(void) {
 
 BdbStatus read_bytes(FILE *file, void *destination, size_t item_size, size_t count, BdbError *err, const char *msg);
 
+// Permissions for files BulletDB creates: read and write for the owner only,
+// like PostgreSQL's data files. Used on POSIX systems.
+#define BDB_FILE_MODE 0600
+
+// Creates `path` (or empties it if it exists) and opens it for binary
+// writing. On POSIX systems the file gets BDB_FILE_MODE explicitly, instead
+// of fopen's 0666 minus the user's umask, so it's never readable or writable
+// by other users, even with a permissive umask. An existing file is tightened
+// to BDB_FILE_MODE too. On Windows, new files inherit their folder's ACLs, so
+// this is plain fopen. Returns NULL on failure (errno is set), like fopen.
+FILE *bdb_create_file(const char *path);
+
 #endif //BULLETDB_IO_H

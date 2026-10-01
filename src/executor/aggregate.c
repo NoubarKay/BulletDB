@@ -112,26 +112,28 @@ static BdbStatus aggregate_next(BdbOperator *self, const CHUNK **out, BdbError *
         const COLUMN *col = &chunk->columns[agg->column];
         switch (agg->col_type) {
             case BDB_COL_INT: {
-                const int64_t *v = (const int64_t *)col->data;
+                const int64_t *v = col->data;
                 for (uint64_t i = 0; i < chunk->count; i++) {
-                    if (!col->bitmap[i]) continue;              // skip NULLs
+                    uint64_t k = chunk-> sel_vector ? chunk->sel_vector[i] : i;
+                    if (!col->bitmap[k]) continue;              // skip NULLs
                     agg->count++;
-                    agg->int_sum += v[i];
-                    if (!agg->has_value) { agg->int_min = agg->int_max = v[i]; agg->has_value = true; }
-                    else { if (v[i] < agg->int_min) agg->int_min = v[i];
-                        if (v[i] > agg->int_max) agg->int_max = v[i]; }
+                    agg->int_sum += v[k];
+                    if (!agg->has_value) { agg->int_min = agg->int_max = v[k]; agg->has_value = true; }
+                    else { if (v[k] < agg->int_min) agg->int_min = v[k];
+                        if (v[k] > agg->int_max) agg->int_max = v[k]; }
                 }
                 break;
             }
             case BDB_COL_DOUBLE: {
-                const double *v = (const double *)col->data;
+                const double *v = col->data;
                 for (uint64_t i = 0; i < chunk->count; i++) {
-                    if (!col->bitmap[i]) continue;              // skip NULLs
+                    uint64_t k = chunk-> sel_vector ? chunk->sel_vector[i] : i;
+                    if (!col->bitmap[k]) continue;              // skip NULLs
                     agg->count++;
-                    agg->double_sum += v[i];
-                    if (!agg->has_value) { agg->double_min = agg->double_max = v[i]; agg->has_value = true; }
-                    else { if (v[i] < agg->double_min) agg->double_min = v[i];
-                        if (v[i] > agg->double_max) agg->double_max = v[i]; }
+                    agg->double_sum += v[k];
+                    if (!agg->has_value) { agg->double_min = agg->double_max = v[k]; agg->has_value = true; }
+                    else { if (v[k] < agg->double_min) agg->double_min = v[k];
+                        if (v[k] > agg->double_max) agg->double_max = v[k]; }
                 }
                 break;
             }

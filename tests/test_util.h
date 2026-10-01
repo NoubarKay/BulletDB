@@ -146,6 +146,30 @@ typedef struct {
     bool            then_null;         // did the second next() return NULL?
 } AggResult;
 
+// Pulls the result out of an aggregate operator that sits on top of any tree,
+// copies it into `res`, then checks that a second next() returns NULL.
+// Leaves `res->status` as an error if any step fails. Doesn't close `op`.
+static inline void collect_aggregate(BdbOperator *op, AggResult *res) {
+    const CHUNK *chunk = NULL;
+    res->status = bdb_op_next(op, &chunk, &res->err);
+    if (res->status != BDB_OK) return;
+
+    if (chunk == NULL || chunk->count != 1 || chunk->col_count != 1) {
+        res->status = BDB_ERR_INVALID;          // the result must be 1 column × 1 row
+        return;
+    }
+    const COLUMN *col = &chunk->columns[0];
+    snprintf(res->name, sizeof res->name, "%s", col->name ? col->name : "");
+    res->type  = col->type;
+    res->valid = col->bitmap[0] != 0;
+    if (col->type == BDB_COL_INT)    res->i = ((const int64_t *)col->data)[0];
+    if (col->type == BDB_COL_DOUBLE) res->d = ((const double *)col->data)[0];
+
+    const CHUNK *again = NULL;
+    BdbStatus second = bdb_op_next(op, &again, &res->err);
+    res->then_null = second == BDB_OK && again == NULL;
+}
+
 // Runs  AGGREGATE kind(column) ← SCAN bdb_path  and copies out the result.
 static inline AggResult run_aggregate(const char *bdb_path, BdbAggregateType kind, const char *column) {
     AggResult res = {0};
@@ -156,27 +180,7 @@ static inline AggResult run_aggregate(const char *bdb_path, BdbAggregateType kin
     bdb_aggregate_init(&agg, &scan.base, kind, column);
     BdbOperator *op = &agg.base;
 
-    if (res.status == BDB_OK) {
-        const CHUNK *chunk = NULL;
-        res.status = bdb_op_next(op, &chunk, &res.err);
-
-        if (res.status == BDB_OK) {
-            if (chunk == NULL || chunk->count != 1 || chunk->col_count != 1) {
-                res.status = BDB_ERR_INVALID;      // the result must be 1 column × 1 row
-            } else {
-                const COLUMN *col = &chunk->columns[0];
-                snprintf(res.name, sizeof res.name, "%s", col->name ? col->name : "");
-                res.type  = col->type;
-                res.valid = col->bitmap[0] != 0;
-                if (col->type == BDB_COL_INT)    res.i = ((const int64_t *)col->data)[0];
-                if (col->type == BDB_COL_DOUBLE) res.d = ((const double *)col->data)[0];
-
-                const CHUNK *again = NULL;
-                BdbStatus second = bdb_op_next(op, &again, &res.err);
-                res.then_null = second == BDB_OK && again == NULL;
-            }
-        }
-    }
+    if (res.status == BDB_OK) collect_aggregate(op, &res);
 
     op->close(op);     // closes the aggregate and the scan
     return res;

@@ -1,0 +1,14 @@
+# CodeQL configuration for BulletDB (used by .github/workflows/codeql.yml).
+#
+# Note: paths-ignore has no effect for C. CodeQL analyzes whatever the
+# workflow compiles, so the tests are excluded there instead (the CodeQL build
+# uses -DBDB_BUILD_TESTS=OFF).
+
+query-filters:
+  - exclude:
+      # Exact floating-point comparison is intended. SQL's "=" compares stored
+      # values exactly (as PostgreSQL, SQLite and DuckDB do): an epsilon would
+      # make "= x" and "!= x" overlap and equality non-transitive. Both the
+      # stored values and query constants come from the same strtod, so equal
+      # text gives bit-identical doubles.
+      id: cpp/equality-on-floats

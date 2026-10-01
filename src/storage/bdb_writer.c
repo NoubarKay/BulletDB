@@ -12,7 +12,8 @@
 BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
     *writer = (BDB_WRITER){0};
 
-    writer->file = fopen(path, "wb");
+    // Owner-only permissions on POSIX (see bdb_create_file in io.h)
+    writer->file = bdb_create_file(path);
     if (writer->file == NULL) {
         return bdb_error_set(err, BDB_ERR_OPEN, "could not open '%s'", path);
     }

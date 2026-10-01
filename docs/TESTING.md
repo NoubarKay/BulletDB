@@ -20,6 +20,7 @@ them together.
 | `test_roundtrip` | 246,760 generated rows (3 row groups, NULLs in three columns) go CSV → `.bdb` → reader and come back with every value and every NULL in place, in the right number of chunks; aggregates over the whole file match totals computed while generating |
 | `test_aggregates` | `SUM`, `COUNT`, `MIN`, `MAX` and `AVG` on a small file with known answers: NULLs skipped, result types (`COUNT` is INT, `AVG` is DOUBLE), result names, and a missing column |
 | `test_corrupt` | Damaged files (wrong magic, unknown version, cut off, footer offset past the end, empty, too small) are rejected with `BDB_ERR_FORMAT`, never a crash |
+| `test_filter` | `FILTER` with selection vectors: all six comparisons on INT and DOUBLE columns, NULL never matching, complementary filters adding up, aggregates seeing only selected rows, two stacked filters, a filter matching nothing, error cases, and filters across 2 row groups where most chunks have no match |
 
 The tests write their CSV and `.bdb` files into the build directory, so they
 don't depend on any data file in the repository. Shared helpers (`CHECK`,
@@ -68,8 +69,8 @@ Three jobs:
 | Windows (MinGW-w64, Release) | Windows | The same kind of toolchain as CLion on Windows |
 
 Inside each job, every test area is its **own step**, with its own ✓ / ✗ /
-skipped: *format*, *round trip*, *aggregates* and *corrupt files*. All of them
-run even when one fails.
+skipped: *format*, *round trip*, *aggregates*, *corrupt files* and *filter*.
+All of them run even when one fails.
 
 | Event | Runs |
 |-------|------|
@@ -82,9 +83,9 @@ to the tests that exercise them:
 
 | Changed files | Tests run |
 |---------------|-----------|
-| `src/common`, `src/core`, `src/csv`, the writer, `bdb_format.h`, `io`, `memory`, any `CMakeLists.txt`, `tests/test_util.h`, the workflow | all four |
-| `src/storage/bdb_reader.*` | round trip, aggregates, corrupt |
-| `src/executor/**` | round trip, aggregates |
+| `src/common`, `src/core`, `src/csv`, the writer, `bdb_format.h`, `io`, `memory`, any `CMakeLists.txt`, `tests/test_util.h`, the workflow | all five |
+| `src/storage/bdb_reader.*` | round trip, aggregates, corrupt, filter |
+| `src/executor/**` | round trip, aggregates, filter |
 | `tests/test_<name>.c` | that test |
 | `main.c`, `src/storage/debug.*` | none (build only) |
 

@@ -7,12 +7,14 @@ BdbStatus chunk_init(CHUNK *c, uint64_t col_count) {
     c->col_count = col_count;
     c->count = 0;
     c->columns = NULL;
+    c->sel_vector = NULL;
 
     return BDB_OK;
 }
 
 void chunk_reset(CHUNK *c) {
     c->count = 0;
+    c->sel_vector = NULL;
 }
 
 void chunk_free(CHUNK *c) {
@@ -25,4 +27,5 @@ void chunk_free(CHUNK *c) {
     c->columns = NULL;   // so a second chunk_free does nothing
     c->col_count = 0;
     c->count = 0;
+    c->sel_vector = NULL;
 }

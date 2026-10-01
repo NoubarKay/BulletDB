@@ -5,6 +5,7 @@ set(BDB_TESTS
         test_roundtrip
         test_aggregates
         test_corrupt
+        test_filter
 )
 
 foreach (name IN LISTS BDB_TESTS)

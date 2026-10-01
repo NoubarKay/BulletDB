@@ -1,0 +1,2 @@
+init:
+  config-file: ./.github/codeql/codeql-config.yml
