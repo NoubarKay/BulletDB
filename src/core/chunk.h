@@ -18,6 +18,8 @@ typedef struct {
     uint64_t count; //Number of rows in the chunk;
     uint64_t col_count;
     COLUMN *columns; //Array of columns in the chunk;
+
+    const uint16_t * sel_vector;
 } CHUNK;
 
 BdbStatus chunk_init(CHUNK *c, uint64_t col_count);

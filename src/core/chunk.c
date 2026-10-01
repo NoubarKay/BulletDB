@@ -25,4 +25,5 @@ void chunk_free(CHUNK *c) {
     c->columns = NULL;   // so a second chunk_free does nothing
     c->col_count = 0;
     c->count = 0;
+    c->sel_vector = NULL;
 }
