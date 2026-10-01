@@ -14,6 +14,7 @@ BdbStatus chunk_init(CHUNK *c, uint64_t col_count) {
 
 void chunk_reset(CHUNK *c) {
     c->count = 0;
+    c->sel_vector = NULL;
 }
 
 void chunk_free(CHUNK *c) {

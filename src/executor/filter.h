@@ -7,12 +7,12 @@
 #include "bdb_operator.h"
 
 typedef enum {
-    BDB_OP_EQ,     // =
-    BDB_OP_NE,     // !=
-    BDB_OP_LT,     // <
-    BDB_OP_LE,     // <=
-    BDB_OP_GT,     // >
-    BDB_OP_GE,     // >=
+    BDB_COMPARE_EQ,     // =
+    BDB_COMPARE_NE,     // !=
+    BDB_COMPARE_LT,     // <
+    BDB_COMPARE_LE,     // <=
+    BDB_COMPARE_GT,     // >
+    BDB_COMPARE_GE,     // >=
 } BdbCompareOp;
 
 typedef struct {
@@ -23,8 +23,10 @@ typedef struct {
 
     uint64_t column;        // its index, looked up in the first chunk
     bool found_column;  // has the lookup been done yet?
+    enum ColumnType col_type;
 
-    const char* value;
+    const char* value;      // the constant as given, e.g. "22" (kept for describe)
+    double      number;     // the same constant, parsed once in bdb_filter_init
 
     uint16_t sel[BDB_VECTOR_SIZE]; // internal filter buffer
     CHUNK out_chunk;

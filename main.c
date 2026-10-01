@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
 
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_OP_GT, "50");
+    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GT, "22");
     bdb_aggregate_init(&agg, &filter.base, BDB_AGG_COUNT, "QUANTITYORDERED");
     BdbOperator *op = &agg.base;
 
