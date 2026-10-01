@@ -1,9 +1,8 @@
 # CodeQL configuration for BulletDB (used by .github/workflows/codeql.yml).
-
-# The tests create throwaway CSV and .bdb files in the build directory and
-# compare results exactly on purpose; findings there aren't actionable.
-paths-ignore:
-  - tests
+#
+# Note: paths-ignore has no effect for C. CodeQL analyzes whatever the
+# workflow compiles, so the tests are excluded there instead (the CodeQL build
+# uses -DBDB_BUILD_TESTS=OFF).
 
 query-filters:
   - exclude:
