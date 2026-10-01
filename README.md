@@ -10,6 +10,10 @@
   Issues and discussion are welcome; pull requests may not be accepted.</em>
 </p>
 
+<p align="center">
+  <a href="https://github.com/NoubarKay/BulletDB/actions/workflows/ci.yml"><img src="https://github.com/NoubarKay/BulletDB/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+</p>
+
 > [!WARNING]
 > **v0.2 is currently in active development — this is NOT PRODUCTION READY.**
 > BulletDB is an early-stage research project. The file format, APIs and
@@ -44,6 +48,7 @@ specification, see **[docs/DESIGN.md](docs/DESIGN.md)**.
 ## Contents
 
 - [Building](#building)
+- [Testing](#testing)
 - [Usage](#usage)
 - [CSV input](#csv-input)
 - [Architecture](#architecture)
@@ -60,10 +65,14 @@ specification, see **[docs/DESIGN.md](docs/DESIGN.md)**.
 ## Building
 
 Requirements:
-- CMake 4.3 or newer (CLion ships with a copy)
-- A C compiler such as GCC or Clang (MinGW on Windows)
+- CMake 3.21 or newer (CLion ships with a copy)
+- A C compiler with C23 support, such as GCC 13+ or Clang 18+ (MinGW-w64 on
+  Windows)
 
 In CLion, open the project folder and build the `BulletDB` target.
+
+The engine is built as a static library, `bulletdb`. The `BulletDB` program
+(`main.c`) and the tests both link it.
 
 From the command line:
 
@@ -74,6 +83,57 @@ cmake --build cmake-build-debug
 
 The executable is built at `cmake-build-debug/BulletDB` (`BulletDB.exe` on
 Windows).
+
+## Testing
+
+The tests are in `tests/`. Each one is a small program that returns 0 when
+every check passes, and CTest runs them all:
+
+```sh
+cmake -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+In CLion, the tests appear as run configurations, and **Run 'All CTest'** runs
+them together.
+
+| Test | What it checks |
+|------|----------------|
+| `test_format` | A one-row CSV becomes exactly the 193-byte `.bdb` file from the worked example in [DESIGN.md](docs/DESIGN.md#worked-example), byte for byte |
+| `test_roundtrip` | 246,760 generated rows (3 row groups, NULLs in three columns) go CSV → `.bdb` → reader and come back with every value and every NULL in place, in the right number of chunks; aggregates over the whole file match totals computed while generating |
+| `test_aggregates` | `SUM`, `COUNT`, `MIN`, `MAX` and `AVG` on a small file with known answers: NULLs skipped, result types (`COUNT` is INT, `AVG` is DOUBLE), result names, and a missing column |
+| `test_corrupt` | Damaged files (wrong magic, unknown version, cut off, footer offset past the end, empty, too small) are rejected with `BDB_ERR_FORMAT`, never a crash |
+
+The tests write their CSV and `.bdb` files into the build directory, so they
+don't depend on any data file in the repository.
+
+**Sanitizers.** On Linux or macOS, build with AddressSanitizer and
+UndefinedBehaviorSanitizer to catch memory errors, leaks and undefined
+behavior (they don't work with MinGW on Windows):
+
+```sh
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DBDB_SANITIZE=ON
+cmake --build build-asan
+ctest --test-dir build-asan --output-on-failure
+```
+
+**Warnings.** Every target is built with `-Wall -Wextra`, and a missing
+`return` in a non-`void` function is a build error.
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and runs the
+tests on every push and pull request to `main`, and on version tags (`v*`):
+
+| Job | Platform | Purpose |
+|-----|----------|---------|
+| Linux (GCC, Release) | Ubuntu 24.04 | The main build and test run |
+| Linux (GCC, AddressSanitizer + UBSan) | Ubuntu 24.04 | Fails on any memory error, leak or undefined behavior |
+| Windows (MinGW-w64, Release) | Windows | The same kind of toolchain as CLion on Windows |
+
+To make the checks required before merging, enable branch protection for
+`main` (**Settings → Branches**) and mark the three jobs as required.
 
 ## Usage
 
@@ -512,12 +572,18 @@ if (status != BDB_OK) {
 
 ```
 BulletDB/
-├── CMakeLists.txt
+├── CMakeLists.txt               the bulletdb library, the BulletDB program, and the tests
 ├── main.c                       entry point: CSV → test-1.bdb, then runs a query on it
-├── sales.csv                    sample data
+├── .github/workflows/ci.yml     CI: build + tests on Linux, Linux with sanitizers, and Windows
 ├── docs/
 │   ├── DESIGN.md                how the engine is built, and the .bdb v1 spec
 │   └── WRITER_FLOW.md           step-by-step flow diagrams for the writer
+├── tests/                       CTest suite (see Testing)
+│   ├── test_util.h              CHECK macros, file helpers, CSV → .bdb, run one aggregate
+│   ├── test_format.c            the 193-byte worked example, byte for byte
+│   ├── test_roundtrip.c         246,760 rows written and read back, every value checked
+│   ├── test_aggregates.c        SUM/COUNT/MIN/MAX/AVG with known answers and NULLs
+│   └── test_corrupt.c           damaged files are rejected, never a crash
 └── src/                         include root: #include "core/chunk.h"
     ├── common/
     │   └── common.c / .h        BdbStatus, BdbError, error helpers
@@ -748,9 +814,10 @@ Things that are broken right now, most serious first.
       `type`, next to `col_type` for the column's type. The similar names
       already caused one bug (a kind compared with column types); renaming it
       to `kind` would prevent more
-- [ ] No compiler warnings are enabled. `-Wall -Wextra -Werror=return-type`
-      would have caught several crashes found by hand (missing `return`
-      statements, `%s` given a `FILE *`, a `size_t` passed as a `%*s` width)
+- [ ] Warnings are now enabled (`-Wall -Wextra`), and the existing code
+      triggers some of them, for example `%llu` used for `uint64_t` values
+      (correct on Windows, a format warning on Linux, where it should be
+      `PRIu64`). Worth cleaning up once CI shows the full list
 
 ## Roadmap
 
