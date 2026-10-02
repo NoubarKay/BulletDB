@@ -103,9 +103,9 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
         return bdb_error_set(err, BDB_ERR_FORMAT, "'%s': group count is missing", path);
     }
 
-    reader->row_groups = malloc(reader->group_count * sizeof(uint32_t));
-    reader->offsets = malloc(reader->group_count * reader->col_count * sizeof(uint64_t));
-    reader->stats = malloc(reader->group_count * reader->col_count * sizeof(BdbColumnStats));
+    reader->row_groups = malloc((size_t)reader->group_count * sizeof(uint32_t));
+    reader->offsets = malloc((size_t)reader->group_count * reader->col_count * sizeof(uint64_t));
+    reader->stats = malloc((size_t)reader->group_count * reader->col_count * sizeof(BdbColumnStats));
 
     for (int i = 0; i < reader->group_count; i++) {
         if (fread(&reader->row_groups[i], sizeof(uint32_t), 1, reader->file) != 1
