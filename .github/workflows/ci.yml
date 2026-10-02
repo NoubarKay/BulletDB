@@ -38,6 +38,7 @@ jobs:
       corrupt:    ${{ steps.decide.outputs.corrupt }}
       filter:     ${{ steps.decide.outputs.filter }}
       csv_types:  ${{ steps.decide.outputs.csv_types }}
+      stats:      ${{ steps.decide.outputs.stats }}
     steps:
       - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
@@ -75,6 +76,7 @@ jobs:
             test_corrupt:    ['tests/test_corrupt.c']
             test_filter:     ['tests/test_filter.c']
             test_csv_types:  ['tests/test_csv_types.c']
+            test_stats:      ['tests/test_stats.c']
 
       - name: Decide
         id: decide
@@ -97,6 +99,7 @@ jobs:
           #   corrupt    - writer + reader
           #   filter     - CSV import + writer + reader + executor
           #   csv_types  - CSV import + writer + reader + executor
+          #   stats      - CSV import + writer + reader + executor
           {
             echo "code=$(any $all "$code")"
             echo "format=$(any $all "$every" '${{ steps.filter.outputs.test_format }}')"
@@ -105,6 +108,7 @@ jobs:
             echo "corrupt=$(any $all "$every" "$reader" '${{ steps.filter.outputs.test_corrupt }}')"
             echo "filter=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_filter }}')"
             echo "csv_types=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_csv_types }}')"
+            echo "stats=$(any $all "$every" "$reader" "$executor" '${{ steps.filter.outputs.test_stats }}')"
           } | tee -a "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -148,6 +152,10 @@ jobs:
       - name: "Test: CSV types (sniffer, strict parsing)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"
+
+      - name: "Test: stats (per-group min/max in the footer)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.stats == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_stats$"
 
   # ---------------------------------------------------------------------------
   # Linux, GCC, AddressSanitizer + UndefinedBehaviorSanitizer
@@ -194,6 +202,10 @@ jobs:
       - name: "Test: CSV types (sniffer, strict parsing)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"
+
+      - name: "Test: stats (per-group min/max in the footer)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.stats == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_stats$"
 
   # ---------------------------------------------------------------------------
   # Windows, MSYS2 MinGW-w64, Release (the same kind of toolchain as CLion)
@@ -248,3 +260,7 @@ jobs:
       - name: "Test: CSV types (sniffer, strict parsing)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.csv_types == 'true' }}
         run: ctest --test-dir build --output-on-failure -R "^test_csv_types$"
+
+      - name: "Test: stats (per-group min/max in the footer)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && needs.changes.outputs.stats == 'true' }}
+        run: ctest --test-dir build --output-on-failure -R "^test_stats$"

@@ -15,8 +15,7 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
 (format v2) and zone-map pruning.
 
 ### Added
-- Test suite (CTest): `test_format` (the 193-byte worked example, byte for
-  byte), `test_roundtrip` (246,760 rows across 3 row groups, every value and
+- Test suite (CTest): `test_format` (the worked example, byte for byte), `test_roundtrip` (246,760 rows across 3 row groups, every value and
   NULL checked), `test_aggregates` (all five aggregates with known answers),
   and `test_corrupt` (damaged files are rejected, never a crash).
 - GitHub Actions: CI on Linux, Linux with AddressSanitizer + UBSan, and
@@ -33,8 +32,17 @@ Work towards 0.2: `FILTER` with selection vectors, per-group statistics
 - `test_csv_types`: the sniffer's choices, and bad values after the sample
   rejected with their exact line.
 - Row numbers (starting at 1) in the table printer.
+- **File format version 2:** the footer stores each column's smallest and
+  largest value for every row group (`has_minmax`, `min`, `max`: 17 bytes per
+  column per group), with NULLs left out. The reader loads them into
+  `BDB_READER.stats`. Nothing uses them to skip groups yet.
+- `test_stats`: every group's min and max against generated data (NULLs,
+  negative values, a `BOOL` column, a column that's entirely NULL in one
+  group), and against `MIN`/`MAX` from a scan.
 
 ### Changed
+- **`.bdb` files from before this version can't be read.** The version field
+  is now 2 and the reader rejects version 1; import the CSV again.
 - CSV values are validated against their column's type on every row. A value
   that doesn't fit (`2.5` or `abc` in an `INT` column, `maybe` in a `BOOL`
   column, an integer that overflows `int64_t`) stops the import with an error

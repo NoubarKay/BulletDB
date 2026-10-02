@@ -16,20 +16,22 @@ them together.
 
 | Test | What it checks |
 |------|----------------|
-| `test_format` | A one-row CSV becomes exactly the 193-byte `.bdb` file from the [worked example](DESIGN.md#worked-example), byte for byte |
+| `test_format` | A one-row CSV becomes exactly the 278-byte `.bdb` file from the [worked example](DESIGN.md#worked-example), byte for byte |
 | `test_roundtrip` | 246,760 generated rows (3 row groups, NULLs in three columns) go CSV → `.bdb` → reader and come back with every value and every NULL in place, in the right number of chunks; aggregates over the whole file match totals computed while generating |
 | `test_aggregates` | `SUM`, `COUNT`, `MIN`, `MAX` and `AVG` on a small file with known answers: NULLs skipped, result types (`COUNT` is INT, `AVG` is DOUBLE), result names, and a missing column |
-| `test_corrupt` | Damaged files (wrong magic, unknown version, cut off, footer offset past the end, empty, too small) are rejected with `BDB_ERR_FORMAT`, never a crash |
+| `test_corrupt` | Damaged files (wrong magic, unknown version, a version 1 file, cut off, footer offset past the end, empty, too small) are rejected with `BDB_ERR_FORMAT`, never a crash |
 | `test_filter` | `FILTER` with selection vectors: all six comparisons on INT and DOUBLE columns, NULL never matching, complementary filters adding up, aggregates seeing only selected rows, two stacked filters, a filter matching nothing, error cases, the writer rejecting a filtered chunk, and filters across 2 row groups where most chunks have no match |
 | `test_csv_types` | The CSV sniffer: `BOOL` → `INT` → `DOUBLE` promotion anywhere in the sample, NULLs not deciding a type, all-NULL columns as `DOUBLE`, the `int64_t` limits, and text, bool words mixed with numbers, or malformed rows rejected. Files longer than the sample: every row imported exactly once, and bad `INT`, `DOUBLE` and `BOOL` values after the sample rejected with their exact line |
+| `test_stats` | The per-group min and max in the footer: 123,380 generated rows (2 row groups) with every group's stats checked against the generator, NULLs left out, negative values, a `BOOL` column, and a column that's entirely NULL in the first group (`has_minmax` = 0, zeroed min/max); the stats combined over the groups equal `MIN` and `MAX` from a scan; and a two-row file with known answers |
 
 The tests write their CSV and `.bdb` files into the build directory, so they
 don't depend on any data file in the repository. Shared helpers (`CHECK`,
 `REQUIRE`, CSV → `.bdb`, running one aggregate) are in `tests/test_util.h`.
 
-**When the file format changes** (for example format v2 with per-group
-statistics), `test_format`'s expected bytes and the worked example in
-DESIGN.md must be updated together.
+**When the file format changes** (as it did for format v2, which added the
+per-group statistics), `test_format`'s expected bytes and the worked example
+in DESIGN.md must be updated together, and `BDB_VERSION` must be raised so
+older files are rejected instead of misread.
 
 ## Sanitizers
 
@@ -70,8 +72,8 @@ Three jobs:
 | Windows (MinGW-w64, Release) | Windows | The same kind of toolchain as CLion on Windows |
 
 Inside each job, every test area is its **own step**, with its own ✓ / ✗ /
-skipped: *format*, *round trip*, *aggregates*, *corrupt files* and *filter*.
-All of them run even when one fails.
+skipped: *format*, *round trip*, *aggregates*, *corrupt files*, *filter*,
+*CSV types* and *stats*. All of them run even when one fails.
 
 | Event | Runs |
 |-------|------|
@@ -84,9 +86,9 @@ to the tests that exercise them:
 
 | Changed files | Tests run |
 |---------------|-----------|
-| `src/common`, `src/core`, `src/csv`, the writer, `bdb_format.h`, `io`, `memory`, any `CMakeLists.txt`, `tests/test_util.h`, the workflow | all five |
-| `src/storage/bdb_reader.*` | round trip, aggregates, corrupt, filter |
-| `src/executor/**` | round trip, aggregates, filter |
+| `src/common`, `src/core`, `src/csv`, the writer, `bdb_format.h`, `io`, `memory`, any `CMakeLists.txt`, `tests/test_util.h`, the workflow | all seven |
+| `src/storage/bdb_reader.*` | round trip, aggregates, corrupt, filter, CSV types, stats |
+| `src/executor/**` | round trip, aggregates, filter, CSV types, stats |
 | `tests/test_<name>.c` | that test |
 | `main.c`, `src/storage/debug.*` | none (build only) |
 

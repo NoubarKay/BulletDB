@@ -24,11 +24,13 @@ Built one operator at a time (design in
 
 ## Next: format v2 and pruning
 
-- [ ] Per-row-group statistics in the footer: `min`, `max`, `null_count` per
-      column (format v2)
+- [x] Per-row-group `min` and `max` per column in the footer (format v2),
+      loaded by the reader, with `test_stats`
 - [ ] Zone-map pruning: the scan skips row groups whose min/max can't match the
       filter (predicate pushdown)
-- [ ] `MIN`, `MAX`, `COUNT` without `WHERE` answered from the footer alone
+- [ ] `MIN` and `MAX` without `WHERE` answered from the footer alone
+- [ ] `null_count` and `sum` per column per group (another format version),
+      so `COUNT`, `SUM` and `AVG` without `WHERE` need no scan either
 - [ ] Projection: the reader reads only the columns a query needs
 
 ## Later
@@ -61,7 +63,7 @@ Built one operator at a time (design in
 - [x] Pull-based CSV reader that streams fixed-size chunks
 - [x] In-place CSV field splitting (1.8 times faster, no allocations per field)
 - [x] Bordered table printer
-- [x] Columnar `.bdb` v1 file writer: typed column blocks with NULL bitmaps,
+- [x] Columnar `.bdb` file writer: typed column blocks with NULL bitmaps,
       row groups, and a footer with the schema and every block's offset
 - [x] `.bdb` reader: opens a file, loads its footer, and streams the data back
       one chunk at a time
@@ -86,6 +88,11 @@ value as the CSV.
 **Tests and CI (2026-10-01).** Four CTest tests (format, round trip,
 aggregates, corrupt files), run on Linux, Linux with sanitizers, and Windows
 on every push.
+
+**Format v2: per-group min and max (2026-10-02).** The footer holds each
+column's smallest and largest value for every row group, the reader loads
+them, and `test_stats` checks them against generated data and against
+`MIN`/`MAX` from a scan.
 
 Expected sums for the 225,721-row sample file used during development:
 

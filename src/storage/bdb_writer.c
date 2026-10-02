@@ -9,6 +9,49 @@
 #include "memory.h"
 #include "io.h"
 
+static void compute_stats(BdbColumnStats* s, const COLUMN *col, uint64_t count) {
+    s->has_minmax = false;
+    s->max.d = 0;
+    s->min.d = 0;
+
+    for (uint64_t row = 0; row<count; row++) {
+        if (!col->bitmap[row]) continue;
+
+        switch (col->type) {
+            case BDB_COL_DOUBLE:
+                double double_val = ((const double*)col->data)[row];
+                if (!s->has_minmax) {
+                    s->max.d = double_val;
+                    s->min.d = double_val;
+                    s->has_minmax = true;
+                }else {
+                    if (double_val > s->max.d) {
+                        s->max.d = double_val;
+                    }
+                    if (double_val < s->min.d) {
+                        s->min.d = double_val;
+                    }
+                }
+                break;
+            case BDB_COL_INT:
+            case BDB_COL_BOOL: {
+                int64_t v = col->type == BDB_COL_INT ? ((const int64_t *)col->data)[row] : ((const bool *)col->data)[row];
+                if (!s->has_minmax) {
+                    s->min.i = v;
+                    s->max.i = v;
+                    s->has_minmax = true;
+                } else {
+                    if (v < s->min.i) s->min.i = v;
+                    if (v > s->max.i) s->max.i = v;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
 BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
     *writer = (BDB_WRITER){0};
 
@@ -24,7 +67,7 @@ BdbStatus bdb_writer_open(BDB_WRITER *writer, const char *path, BdbError *err) {
         fclose(writer->file);
         writer->file = NULL;
         return bdb_error_set(err, BDB_ERR_IO, "could not write header to '%s'", path);
-        }
+    }
     return BDB_OK;
 }
 
@@ -33,8 +76,10 @@ void bdb_writer_close(BDB_WRITER *writer) {
 
     free(writer->group_rows);
     free(writer->offsets);
+    free(writer->stats);
     writer->group_rows = NULL;
     writer->offsets = NULL;
+    writer->stats = NULL;
     writer->group_count = 0;
     writer->groups_capacity = 0;
 
@@ -83,6 +128,12 @@ static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
           if (offs == NULL) return bdb_error_set(err, BDB_ERR_NOMEM, "could not grow offsets");
           w->offsets = offs;
 
+          BdbColumnStats *stats = GROW_ARRAY(BdbColumnStats, w->stats,
+                                      (size_t)old_cap * w->col_count,
+                                      (size_t)new_cap * w->col_count);    // × col_count
+          if (stats == NULL) return bdb_error_set(err, BDB_ERR_NOMEM, "could not grow stats");
+          w->stats = stats;
+
           w->groups_capacity = new_cap;
       }
 
@@ -99,7 +150,12 @@ static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
         if (written != w->group.count) {
             return bdb_error_set(err, BDB_ERR_IO, "failed to write data for column '%s'", w->group.columns[i].name);
         }
+
+        BdbColumnStats *s = &w->stats[(size_t)w->group_count * w->col_count + i];
+        compute_stats(s, &w->group.columns[i], w->group.count);
     }
+
+
     w->row_count+=w->group.count;
     w->group_rows[w->group_count] = w->group.count;
     w->group_count++;
@@ -178,6 +234,18 @@ static BdbStatus bdb_write_footer(BDB_WRITER *w, BdbError *err) {
         const uint64_t *group_offsets = &w->offsets[(size_t)g * w->col_count];
         if (fwrite(group_offsets, sizeof(uint64_t), w->col_count, w->file) != w->col_count) {
             return bdb_error_set(err, BDB_ERR_IO, "could not write offsets of group %u", g);
+        }
+
+        const BdbColumnStats *group_stats = &w->stats[(size_t)g * w->col_count];
+        for (uint16_t c = 0; c < w->col_count; c++) {
+            const BdbColumnStats *stats = &group_stats[c];
+            uint8_t has_minmax = stats->has_minmax ? 1 : 0;
+
+            if (fwrite(&has_minmax, sizeof(has_minmax), 1, w->file) != 1 ||
+                fwrite(&stats->min, sizeof(stats->min), 1, w->file) != 1 ||
+                fwrite(&stats->max, sizeof(stats->max), 1, w->file) != 1) {
+                return bdb_error_set(err, BDB_ERR_IO, "could not write stats of group %u", g);
+            }
         }
     }
 

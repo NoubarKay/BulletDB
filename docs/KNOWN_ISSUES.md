@@ -31,11 +31,16 @@ Things that don't exist yet, or work in a restricted way, by design for now.
   needs (projection) is planned; the format already supports it.
 - **CSV:** quoted fields and commas inside values aren't supported.
 - **Fixed output file.** `main` always writes `test-1.bdb`.
-- **File format:** little-endian only. No per-group statistics or compression
-  yet (planned for format v2).
+- **File format:** little-endian only, and no compression yet. The footer has
+  each column's min and max per row group, but no `null_count` or `sum`.
+- **Version 1 files can't be read.** The reader accepts only the current
+  format version (2); an older file has to be imported again from its CSV.
+- **The per-group min and max aren't used yet.** Every query still reads
+  every row group; pruning is the next step.
 - **Blocks aren't aligned.** Values can start at odd byte offsets in the file.
   That's fine for `fread`, but reading values in place from a memory-mapped
-  file would need blocks padded to 8 bytes (planned for format v2).
+  file would need blocks padded to 8 bytes (planned for a later format
+  version).
 
 ## Bugs
 
@@ -50,6 +55,14 @@ Things that are broken right now, most serious first.
 - [ ] `FILTER` parses its constant as a `double`, so integer constants above
       2⁵³ (about 9 × 10¹⁵) lose precision. Parse whole-number constants with
       `strtoll` for `INT` columns
+- [ ] The CSV reader accepts `nan` and `inf` as `DOUBLE` values (`strtod`
+      parses them), and the writer doesn't skip `NaN` when it computes a row
+      group's min and max. If a group's first non-NULL value is `NaN`, both
+      stats are `NaN` for that group, because every comparison with `NaN` is
+      false. Harmless until zone-map pruning uses the stats; then it can skip
+      a group that has matching rows. Fix by rejecting `nan`/`inf` at import
+      (which also keeps them out of `SUM` and `AVG`), or by skipping `NaN` in
+      `compute_stats`
 - [ ] `bdb_now` (Windows) computes `counter × 1,000,000,000` before dividing,
       which overflows `int64_t` once the machine has been up for about 15
       minutes, so operator timings can be garbage. Split it into seconds and
@@ -66,7 +79,7 @@ Things that are broken right now, most serious first.
       doesn't end at the trailer (these are only checked by
       `bdb_reader_debug_dump`). A corrupted footer could make `next_chunk`
       read from the wrong place. It also doesn't check the `name_len` read or
-      the `malloc` results for `row_groups` and `offsets`
+      the `malloc` results for `row_groups`, `offsets` and `stats`
 
 **Memory**
 - [ ] `free_table` doesn't free `bitmap`
