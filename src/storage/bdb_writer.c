@@ -151,7 +151,7 @@ static BdbStatus bdb_write_group(BDB_WRITER *w, BdbError *err) {
             return bdb_error_set(err, BDB_ERR_IO, "failed to write data for column '%s'", w->group.columns[i].name);
         }
 
-        BdbColumnStats *s = &w->stats[w->group_count * w->col_count + i];
+        BdbColumnStats *s = &w->stats[(size_t)w->group_count * w->col_count + i];
         compute_stats(s, &w->group.columns[i], w->group.count);
     }
 
