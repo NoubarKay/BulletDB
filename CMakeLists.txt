@@ -48,7 +48,12 @@ add_library(bulletdb STATIC
 target_include_directories(bulletdb PUBLIC src)
 bdb_warnings(bulletdb)
 
-add_executable(BulletDB main.c)
+add_executable(BulletDB main.c
+        src/logical/bdb_field.h
+        src/logical/bdb_schema.h
+        src/logical/bdb_logical_plan.h
+        src/logical/bdb_expr.h
+        src/logical/bdb_expr.c)
 target_link_libraries(BulletDB PRIVATE bulletdb)
 bdb_warnings(BulletDB)
 

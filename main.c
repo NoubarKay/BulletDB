@@ -16,6 +16,7 @@
 #include "executor/scan.h"
 #include "executor/explain.h"
 #include "executor/filter.h"
+#include "logical/bdb_expr.h"
 #include "storage/bdb_format.h"
 #include "storage/bdb_reader.h"
 #include "storage/bdb_writer.h"
@@ -37,7 +38,56 @@ static BdbStatus print_chunk_cb(const CHUNK *chunk, BdbError *err) {
     return BDB_OK;
 }
 
+// Prints one logical expression, then what bdb_expr_to_field says it produces
+// against `schema`: a field's name and type, or the error.
+static void show_expr(const char *label, const BdbExpr *expr, const BdbSchema *schema) {
+    BdbField field;
+    BdbError err = {0};
+
+    printf("%-28s prints as  ", label);
+    bdb_expr_print(expr, stdout);
+
+    if (bdb_expr_to_field(expr, schema, &field, &err) != BDB_OK) {
+        printf("\n%-28s error: %s\n\n", "", err.message);
+        return;
+    }
+    const char *type = field.type == BDB_COL_INT    ? "INT"
+                     : field.type == BDB_COL_DOUBLE ? "DOUBLE"
+                     : field.type == BDB_COL_BOOL   ? "BOOL" : "STR";
+    printf("\n%-28s field: name \"%s\", type %s\n\n", "", field.name, type);
+}
+
+// A tour of the logical expressions, checked against a made-up employees table.
+static void show_logical_expressions(void) {
+    BdbField fields[] = {
+        { "name",       BDB_COL_STR },
+        { "salary",     BDB_COL_DOUBLE },
+        { "department", BDB_COL_STR },
+        { "age",        BDB_COL_INT },
+    };
+    BdbSchema employees = { fields, 4 };
+
+    BdbExpr salary      = bdb_expr_column("salary");
+    BdbExpr age         = bdb_expr_column("age");
+    BdbExpr missing     = bdb_expr_column("height");            // not in the table
+    BdbExpr forty_five  = bdb_expr_literal_long(45);
+    BdbExpr negative    = bdb_expr_literal_long(-7);
+    BdbExpr factor      = bdb_expr_literal_double(1.1);
+    BdbExpr engineering = bdb_expr_literal_string("Engineering");
+
+    printf("== logical expressions ==\n\n");
+    show_expr("column salary",                &salary,      &employees);
+    show_expr("column age",                   &age,         &employees);
+    show_expr("column height (missing)",      &missing,     &employees);
+    show_expr("literal long 45",              &forty_five,  &employees);
+    show_expr("literal long -7",              &negative,    &employees);
+    show_expr("literal double 1.1",           &factor,      &employees);
+    show_expr("literal string Engineering",   &engineering, &employees);
+}
+
 int main(int argc, char *argv[]) {
+    show_logical_expressions();
+
     BdbError err = {0};
     CSV_READER csvReader = {0};
     BDB_WRITER writer = {0};
