@@ -38,7 +38,8 @@ DuckDB and Parquet.
 - **CSV import** that streams a file in chunks of up to 2048 typed rows
   (`INT`, `DOUBLE`, `BOOL`), with NULLs
 - **A columnar file format (`.bdb`)** with row groups, NULL bitmaps, and a
-  footer that indexes every column block
+  footer that indexes every column block and holds each column's min and max
+  per row group
 - **A streaming reader** that holds only the footer and one chunk in memory,
   whatever the file size
 - **A vectorized query executor** (Volcano model, one chunk per call):
@@ -49,7 +50,7 @@ DuckDB and Parquet.
   time)
 - **Tests and CI** on Linux, Linux with sanitizers, and Windows
 
-Next up: per-group statistics (format v2) and zone-map pruning, so a filter
+Next up: zone-map pruning, which uses the per-group min and max so a filter
 can skip whole row groups. See the [roadmap](docs/ROADMAP.md).
 
 ## Quick start
@@ -94,7 +95,7 @@ printing chunks, and the debug dumps.
 | Layer | What it does | Details |
 |-------|--------------|---------|
 | **Chunks** | Batches of up to 2048 rows, stored column by column with a NULL bitmap. The unit that moves through the engine. | [DESIGN.md, Part 1](docs/DESIGN.md#part-1-current-design) |
-| **Storage** | `.bdb` files: a header, row groups of up to 122,880 rows (one block per column), then a footer with the schema and every block's offset | [DESIGN.md, Part 2](docs/DESIGN.md#part-2-bdb-v1-file-format) |
+| **Storage** | `.bdb` files: a header, row groups of up to 122,880 rows (one block per column), then a footer with the schema, every block's offset, and each column's min and max per row group | [DESIGN.md, Part 2](docs/DESIGN.md#part-2-bdb-file-format) |
 | **Execution** | A tree of operators passing chunks up to each other, each with `next`, `close` and `describe` | [DESIGN.md, Part 3](docs/DESIGN.md#part-3-query-execution) |
 
 ## Documentation

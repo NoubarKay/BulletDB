@@ -1,18 +1,20 @@
 # BulletDB design
 
 This document describes how BulletDB is built today: the data model, the
-`.bdb` v1 file format with its writer and reader, and the query executor.
+`.bdb` file format (version 2) with its writer and reader, and the query
+executor.
 
 - Part 1, [Current design](#part-1-current-design), covers the data model and
   the CSV side.
-- Part 2, [.bdb v1](#part-2-bdb-v1-file-format), covers the file format. The
+- Part 2, [.bdb file format](#part-2-bdb-file-format), covers the file. The
   **writer and reader are built**, and the storage round trip (CSV → `.bdb` →
   chunks) gives back every value exactly.
 - Part 3, [Query execution](#part-3-query-execution), covers the executor: a
   tree of operators passing chunks to each other. **`SCAN`, `FILTER` (with
   selection vectors) and `AGGREGATE` (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`)
   work**, together with a plan printer and per-operator stats and timing
-  (D1–D3). Per-group statistics and zone-map pruning (format v2) are next.
+  (D1–D3). The footer stores each column's min and max per row group
+  (format v2); zone-map pruning, which uses them to skip groups, is next.
 
 This document covers the structure of the engine and the reasons behind it.
 Running it is in [USAGE.md](USAGE.md), tests and CI in
@@ -30,11 +32,12 @@ Running it is in [USAGE.md](USAGE.md), tests and CI in
   - [Memory ownership](#memory-ownership)
   - [Error handling](#error-handling)
   - [What's switched off](#whats-switched-off)
-- [Part 2: .bdb v1 file format](#part-2-bdb-v1-file-format)
+- [Part 2: .bdb file format](#part-2-bdb-file-format)
   - [Requirements](#requirements)
   - [File layout](#file-layout)
   - [Row groups](#row-groups)
   - [Footer](#footer)
+  - [Statistics](#statistics)
   - [Reading a file](#reading-a-file)
   - [Worked example](#worked-example)
   - [Validation](#validation)
@@ -400,7 +403,12 @@ All of that has since been replaced and deleted (git history keeps it):
 
 ---
 
-# Part 2: .bdb v1 file format
+# Part 2: .bdb file format
+
+This describes **version 2**, the only version the writer produces and the
+reader accepts. Version 1 had the same layout without the per-group
+[statistics](#statistics) in the footer; the reader rejects v1 files, so they
+have to be imported again from their CSV.
 
 ## Requirements
 
@@ -445,7 +453,7 @@ All integers are **little-endian**, the native order on x86-64 and ARM64. The
 current code writes native byte order, and a big-endian platform would need
 byte swapping.
 
-`version` is `1`.
+`version` is `2`.
 
 The **footer goes at the end** because it holds things the writer only knows
 at the end: the total row count and where each row group landed. This is the
@@ -491,6 +499,10 @@ for each group:
     row_count    u32          rows in this group (≤ BDB_ROW_GROUP_SIZE)
     for each column:
         offset   u64          byte offset of this column's block
+    for each column:
+        has_minmax  u8        1 if min and max are set, 0 if the group has no values
+        min         8 bytes   see Statistics
+        max         8 bytes
 ```
 
 Each field is written separately with its exact size, never as a C struct,
@@ -507,18 +519,51 @@ Block sizes aren't stored, because they follow from the group's `row_count`
 and the column's type (see the table above). Once blocks can be compressed,
 a later version will store sizes too.
 
-Footer size: `8 + 2 + Σ(2 + name_len + 1) + 4 + group_count × (4 + 8 × col_count)`
-bytes. For 3 columns and 1,000 groups (about 123 million rows), that's about
-28 KB.
+Footer size: `8 + 2 + Σ(2 + name_len + 1) + 4 + group_count × (4 + 25 × col_count)`
+bytes: each column costs 8 bytes of offset and 17 of statistics per group.
+For 3 columns and 1,000 groups (about 123 million rows), that's about 79 KB.
+
+## Statistics
+
+For every row group, the footer stores the smallest and the largest value of
+each column. They exist so a query can decide from the footer alone whether a
+group can contain matching rows, and skip it if not (zone-map pruning, see
+[Optimizer](#optimizer)).
+
+```
+has_minmax   u8        1 = min and max are set
+min          8 bytes
+max          8 bytes
+```
+
+- **`min` and `max` are always 8 bytes**, read according to the column's
+  type: `INT` as an `int64_t`, `DOUBLE` as a `double`, and `BOOL` as an
+  `int64_t` holding 0 or 1. In memory that's the union `BdbStatValue`.
+- **NULL rows are left out.** A NULL's value slot holds 0, which would
+  otherwise become the min of any column of positive numbers.
+- **`has_minmax` is 0 when the group has no non-NULL value** for that column.
+  `min` and `max` are then written as zeros and mean nothing; a reader must
+  check the flag before using them.
+- **A group's stats come after all of its offsets,** not interleaved with
+  them, so the offsets stay one array that's read with a single `fread`.
+- **The three fields are written one by one.** In memory `BdbColumnStats` is
+  24 bytes because of padding after the `bool`; on disk it's 17.
+
+The writer computes them in `bdb_write_group` (`compute_stats`), with one
+pass over each column of the group just before it's reset. That's a few
+comparisons per value, against several hundred nanoseconds to parse the row
+from CSV.
+
+`NaN` isn't handled yet: see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Reading a file
 
 ```
 1. file size < 20 bytes?                     → BDB_ERR_FORMAT (too small)
-2. read bytes 0..7: magic, version           → check "BDB1", version == 1
+2. read bytes 0..7: magic, version           → check "BDB1", version == 2
 3. read the last 12 bytes: footer_offset, magic
                                              → check "BDB1" (catches truncation)
-4. seek to footer_offset, read the footer    → schema + group offsets
+4. seek to footer_offset, read the footer    → schema + group offsets + stats
 5. for each chunk the caller asks for:
      find the group and the row range inside it,
      seek to each needed column's block + row range, fread
@@ -538,7 +583,7 @@ ORDERNUMBER,QUANTITYORDERED,PRICEEACH,ORDERLINENUMBER,SALES
 |--------|-------|----------|
 | **Header** | | |
 | 0x00 | `42 44 42 31` | `"BDB1"` |
-| 0x04 | `01 00 00 00` | version = 1 |
+| 0x04 | `02 00 00 00` | version = 2 |
 | **Row group 0** (1 row) | | |
 | 0x08 | `01` + `7B 27 00 00 00 00 00 00` | `ORDERNUMBER`: valid, 10107 |
 | 0x11 | `01` + `1E 00 00 00 00 00 00 00` | `QUANTITYORDERED`: valid, 30 |
@@ -556,13 +601,21 @@ ORDERNUMBER,QUANTITYORDERED,PRICEEACH,ORDERLINENUMBER,SALES
 | 0x85 | `01 00 00 00` | group_count = 1 |
 | 0x89 | `01 00 00 00` | group 0: row_count = 1 |
 | 0x8D | 5 × u64 | group 0 offsets: 8, 17, 26, 35, 44 |
+| **Group 0 statistics** (17 bytes per column) | | |
+| 0xB5 | `01` + `7B 27 00 00 00 00 00 00` × 2 | `ORDERNUMBER`: has min/max, min = max = 10107 |
+| 0xC6 | `01` + `1E 00 00 00 00 00 00 00` × 2 | `QUANTITYORDERED`: min = max = 30 |
+| 0xD7 | `01` + `CD CC CC CC CC EC 57 40` × 2 | `PRICEEACH`: min = max = 95.7 |
+| 0xE8 | `01` + `02 00 00 00 00 00 00 00` × 2 | `ORDERLINENUMBER`: min = max = 2 |
+| 0xF9 | `01` + `37 0B 00 00 00 00 00 00` × 2 | `SALES`: min = max = 2871 |
 | **Trailer** | | |
-| 0xB5 | `35 00 00 00 00 00 00 00` | footer_offset = 53 |
-| 0xBD | `42 44 42 31` | `"BDB1"` |
+| 0x10A | `35 00 00 00 00 00 00 00` | footer_offset = 53 |
+| 0x112 | `42 44 42 31` | `"BDB1"` |
 
-The file is **193 bytes**. Every pointer leads to the right place: the
+The file is **278 bytes**. Every pointer leads to the right place: the
 trailer points at the footer, and each offset points at a column's bitmap
-byte (`01`). This is the first test file for the reader.
+byte (`01`). With a single row, every column's min and max are that row's
+value. `test_format` checks these bytes exactly. (The same file in version 1
+was 193 bytes: the 85 bytes of statistics are the difference.)
 
 A larger check: 160,000 rows of the same five columns give two groups
 (122,880 and 37,120 rows). Each column block is `rows × 9` bytes, the data
@@ -575,7 +628,7 @@ The reader rejects a file with `BDB_ERR_FORMAT` when any of these are true:
 
 - The file is smaller than 20 bytes (header plus trailer).
 - Either magic isn't `"BDB1"`.
-- `version` isn't 1.
+- `version` isn't 2.
 - `footer_offset` points outside the file, or before byte 8.
 - `col_count` is 0 or greater than `BDB_MAX_COL_COUNT`.
 - A column type isn't a known, supported `ColumnType`.
@@ -625,7 +678,8 @@ typedef struct {
     uint32_t  group_count;     // groups written so far
     uint32_t *group_rows;      // [group_count]            rows in each group
     uint64_t *offsets;         // [group_count * col_count] offset of each column block
-    uint32_t  groups_capacity; // allocated length of group_rows (offsets: × col_count)
+    BdbColumnStats *stats;     // [group_count * col_count] min/max of each column
+    uint32_t  groups_capacity; // allocated length of group_rows (offsets, stats: × col_count)
 } BDB_WRITER;
 
 BdbStatus bdb_writer_open  (BDB_WRITER *w, const char *path, BdbError *err);
@@ -638,16 +692,19 @@ void      bdb_writer_close (BDB_WRITER *w);
 |----------|------|
 | `open` | Zeroes the struct, opens the file and writes the header (`"BDB1"`, version). |
 | `append` | On the first chunk, copies the schema (names, types) into the group buffer and allocates it (`init_group`). Then `memcpy`s the chunk's values and bitmap onto the end of the buffer. When the buffer holds exactly `BDB_ROW_GROUP_SIZE` rows, writes the group. |
-| `write_group` (static) | Grows `group_rows` and `offsets` if they're full. For each column, records its offset with `bdb_ftell` (64-bit, so offsets past 2 GB work), then writes its bitmap and values. Stores the group's row count, then increments `group_count`, and resets the buffer. |
-| `finish` | Writes the last, partial group if there is one. Records where the footer starts, writes the footer, then the trailer (that position plus `"BDB1"`), and flushes. Every write is checked. |
-| `close` | Frees the buffer and both arrays and closes the file. Safe to call after an error, and safe to call twice. It doesn't write anything, so a file closed without `finish` has no footer. |
+| `write_group` (static) | Grows `group_rows`, `offsets` and `stats` if they're full. For each column, records its offset with `bdb_ftell` (64-bit, so offsets past 2 GB work), writes its bitmap and values, then computes its min and max (`compute_stats`). Stores the group's row count, then increments `group_count`, and resets the buffer. |
+| `finish` | Writes the last, partial group if there is one. Records where the footer starts, writes the footer (schema, then each group's row count, offsets and stats), then the trailer (that position plus `"BDB1"`), and flushes. Every write is checked. |
+| `close` | Frees the buffer and the three arrays and closes the file. Safe to call after an error, and safe to call twice. It doesn't write anything, so a file closed without `finish` has no footer. |
 
 **Growing the arrays.** The number of groups isn't known in advance, so
-`group_rows` and `offsets` grow by doubling (`GROW_CAPACITY` / `GROW_ARRAY` in
+`group_rows`, `offsets` and `stats` grow by doubling (`GROW_CAPACITY` / `GROW_ARRAY` in
 `storage/memory.h`, the same approach as clox). Capacity starts at 0 with
 `NULL` arrays. `write_group` grows only when `group_count == groups_capacity`,
 and the first grow (0 → 8) allocates through `realloc(NULL, ...)`. `offsets`
-is sized `capacity × col_count`.
+and `stats` are sized `capacity × col_count`. Each of the three arrays must be
+grown from its own pointer: growing `stats` from `offsets` made both point at
+the same memory, so the stats overwrote the offsets and the file came out
+unreadable.
 
 **Debugging.** `bdb_writer_debug_dump` in `storage/debug.c` prints the
 schema, each group's row count and each column's offset, and marks any block
@@ -671,9 +728,10 @@ csv_close(&reader);
 ```
 
 **Memory:** one group buffer of `BDB_ROW_GROUP_SIZE × (1 + type_size)` bytes
-per column, about 1.1 MB per `INT` or `DOUBLE` column, plus `4 + 8 ×
-col_count` bytes of metadata per group (its row count and one offset per
-column). The size of the CSV doesn't matter.
+per column, about 1.1 MB per `INT` or `DOUBLE` column, plus `4 + 32 ×
+col_count` bytes of metadata per group (its row count, and per column an
+8-byte offset and a 24-byte `BdbColumnStats`). The size of the CSV doesn't
+matter.
 
 **Known gap:** the schema comes from the first chunk. A CSV with a header but
 no data rows never calls `append`, so the file gets a footer with 0 columns
@@ -699,6 +757,7 @@ typedef struct {
     uint32_t   group_count;
     uint32_t  *row_groups;    // [group_count]            rows in each group
     uint64_t  *offsets;       // [group_count * col_count] offset of each column block
+    BdbColumnStats *stats;    // [group_count * col_count] min/max of each column
 
     // Schema (names, types in chunk.columns) plus buffers for
     // BDB_VECTOR_SIZE rows per column, allocated once at the end of open and
@@ -734,7 +793,10 @@ bdb_reader_close(&reader);
 column's name (into a `malloc`ed buffer with a `'\0'` added, since the file
 doesn't store one) and type (read into a `uint8_t`, checked, then assigned to
 the enum). Then it reads `group_count` and, for each group, its row count
-followed by its `col_count` offsets in one `fread`.
+followed by its `col_count` offsets in one `fread`, then each column's stats
+field by field (`has_minmax`, `min`, `max`) into `stats`. A reader that skips
+the stats reads the next group's row count and offsets out of them, which
+only shows up with two or more groups.
 
 Every field is read with its exact on-disk size. Reading one field with the
 wrong size shifts every read after it. That happened twice while building
@@ -746,7 +808,7 @@ count come out as 65,536, and reading the row count twice made it 8. Using
 `open` loaded, in the same layout as the writer's dump, and checks it
 (column count, types, group row counts and their total, contiguous blocks).
 Problems are printed with `!!`, and it returns how many it found. Checked so
-far: the 193-byte example gives 0 problems, and a 225,721-row file (2 groups)
+far: the worked example gives 0 problems, and a 225,721-row file (2 groups)
 gives a dump identical to the writer's.
 
 **Only the header and footer are held in memory.** Row groups are never
@@ -756,7 +818,7 @@ loaded whole: data is streamed one chunk at a time.
 bdb_reader_open
   ├─ header  (8 bytes)    read → check "BDB1" + version → discarded
   ├─ trailer (12 bytes)   read → footer_offset, check magic → discarded
-  └─ footer               read → kept: row_count, schema, group_rows, offsets
+  └─ footer               read → kept: row_count, schema, group_rows, offsets, stats
 
 bdb_reader_next_chunk     one CHUNK buffer (2048 rows), reused
 ```
@@ -796,8 +858,8 @@ of a group, which in practice means the last chunk of the file. For 225,721
 rows in groups of 122,880 and 102,841: 60 chunks, then 50 chunks plus one
 of 441 rows, 111 in total.
 
-Memory therefore doesn't depend on the file size: the footer is 8 bytes per
-column per group plus 4 per group, and the chunk buffer is about 18 KB per
+Memory therefore doesn't depend on the file size: the footer is 32 bytes per
+column per group (offset and stats) plus 4 per group, and the chunk buffer is about 18 KB per
 `INT` column.
 
 Seeks must be 64-bit because plain `fseek` takes a `long`, which is 32-bit on
@@ -831,7 +893,8 @@ That's the payoff of the columnar layout.
 | # | Decision | Chosen | Why | Revisit when |
 |---|----------|--------|-----|--------------|
 | 1 | Where metadata goes | **Footer** at the end | The writer only knows row counts and offsets at the end, and it must write in one pass | — |
-| 2 | Per-group statistics (min, max, null count) | **Not in v1** | Keeps v1 small. The version field allows adding them. | The query engine can use them to skip groups |
+| 2 | Per-group statistics | **`min` and `max` per column, since v2**, with a `has_minmax` flag for groups with no values | Enough for zone-map pruning. v1 had none, to stay small | `null_count` and `sum` are needed (footer-only `COUNT`, `SUM`, `AVG`) |
+| 11 | Old versions | **The reader rejects v1** instead of reading both layouts | No v1 files exist outside development, and any of them can be re-imported from its CSV | Files exist that can't be regenerated |
 | 3 | Bitmap on disk | **1 byte per row** | Matches memory exactly, so a block is one `fwrite` | NULL bitmaps are packed to 1 bit in memory |
 | 4 | Byte order | **Little-endian (native)** | Every target machine is little-endian | A big-endian target appears |
 | 5 | Column block order | **Bitmap first, then values** | Either works. This fixes one. | — |
@@ -1169,8 +1232,9 @@ scattered through every operator.
 the first few rows of each chunk for operators marked for tracing, without
 touching any operator's own code.
 
-**Zone maps (v0.2).** Per-group `min`/`max` in the footer (format v2), so the
-scan can skip whole row groups that a filter can't match. See
+**Zone maps (v0.2).** The per-group `min`/`max` are in the footer (format v2,
+see [Statistics](#statistics)) and loaded by the reader. What's left is using
+them: the scan skips whole row groups that a filter can't match. See
 [Optimizer](#optimizer).
 
 ## Optimizer
@@ -1249,27 +1313,14 @@ Roughly in order, once v1 works end to end:
 1. **Finish the executor basics** (Part 3, Next steps): tracing (D4) in the
    execution debugger. (`FILTER` is done.)
 2. **Column projection.** The reader loads only the columns a query uses.
-3. **v2: row-group statistics.** Add per-column per-group stats to the footer,
-   stored alongside each group's existing `offset`:
-
-   ```
-   for each group:
-       row_count    u32
-       for each column:
-           offset      u64          (already in v1)
-           min         8 bytes      typed the same as the column
-           max         8 bytes
-           null_count  u32
-           sum         8 bytes      (0 for BOOL)
-   ```
-
-   The writer already sees every value during `bdb_writer_append`, so
-   tracking `min`/`max`/`sum`/`null_count` is a per-row comparison added to
-   the copy loop — essentially free. When `bdb_write_group` fires, the
-   accumulators are committed to the footer arrays and reset.
-
-   These stats are the prerequisite for the zone-map optimizer (see above):
-   a `SKIP` group costs zero I/O; a `FULL` group costs only a footer read.
+3. **More row-group statistics.** `min` and `max` are stored since v2 (see
+   [Statistics](#statistics)), which is what the zone-map optimizer needs to
+   skip a group. Still to add, as another format version: `null_count` and
+   `sum` per column per group, so a group where every row matches (`FULL`)
+   can be answered from the footer alone, and `COUNT`, `SUM` and `AVG`
+   without a `WHERE` need no scan at all. `avg` isn't stored: it's
+   `sum / (row_count − null_count)`, and averages of groups can't be
+   combined.
 4. **Packed bitmaps:** 1 bit per row, stored as `uint64_t` words (32 words per
    2048-row chunk), in memory and on disk.
 5. **Strings,** stored with a dictionary.

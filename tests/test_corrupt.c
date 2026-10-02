@@ -68,8 +68,14 @@ int main(void) {
 
     // A version this reader doesn't know.
     memcpy(copy, valid, size);
-    copy[4] = 2;
+    copy[4] = BDB_VERSION + 1;
     expect_rejected("unknown version", copy, size);
+
+    // An older version: v1 footers have no statistics, so they can't be read
+    // as v2.
+    memcpy(copy, valid, size);
+    copy[4] = 1;
+    expect_rejected("version 1 file", copy, size);
 
     // Wrong magic at the end.
     memcpy(copy, valid, size);

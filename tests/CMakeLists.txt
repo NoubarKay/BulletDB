@@ -7,6 +7,7 @@ set(BDB_TESTS
         test_corrupt
         test_filter
         test_csv_types
+        test_stats
 )
 
 foreach (name IN LISTS BDB_TESTS)
