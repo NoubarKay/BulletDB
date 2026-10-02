@@ -6,6 +6,7 @@
 #define BULLETDB_BDB_WRITER_H
 #include <stdio.h>
 
+#include "bdb_format.h"
 #include "core/chunk.h"
 #include "common/common.h"
 
@@ -21,6 +22,7 @@ typedef struct {
     uint32_t  group_count;
     uint32_t *group_rows;     // [group_count]            rows in each group
     uint64_t *offsets;        // [group_count * col_count] block offset of each column
+    BdbColumnStats *stats;    // [group_count * col_count] stats offset of each column
     uint32_t  groups_capacity; // allocated length of group_rows/offsets (grow by doubling)
 } BDB_WRITER;
 

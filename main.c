@@ -41,7 +41,7 @@ int main(int argc, char *argv[]) {
     BdbError err = {0};
     CSV_READER csvReader = {0};
     BDB_WRITER writer = {0};
-    BdbScan scan; BdbFilter filter; BdbAggregate agg;
+    BdbScan scan; BdbFilter filter; BdbFilter filter2; BdbAggregate agg;
 
     const CHUNK *chunk;
     if (argc != 2 && argc != 3) {
@@ -82,8 +82,10 @@ int main(int argc, char *argv[]) {
 
 
     status = bdb_scan_open(&scan, "test-1.bdb", &err);
-    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GE, "45");
-    BdbOperator *op = &filter.base;
+    bdb_filter_init(&filter, &scan.base, "QUANTITYORDERED", BDB_COMPARE_GE, "30");
+    bdb_filter_init(&filter2, &filter.base, "QUANTITYORDERED", BDB_COMPARE_LT, "45");
+    bdb_aggregate_init(&agg, &filter2.base, BDB_AGG_AVG, "QUANTITYORDERED");
+    BdbOperator *op = &agg.base;
 
     while (status == BDB_OK && (status = bdb_op_next(op, &chunk, &err)) == BDB_OK && chunk != NULL) {
         if (chunk->count == 0) continue;

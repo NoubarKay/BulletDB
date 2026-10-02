@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "bdb_format.h"
 #include "common/common.h"
 #include "core/chunk.h"
 
@@ -22,12 +23,15 @@ typedef struct {
 
     uint32_t *row_groups;
     uint64_t *offsets;
+    BdbColumnStats *stats;
 
     //current row group we are on
     uint32_t group_index;
 
     //current rows in the current row group we are on
     uint64_t rows_in_group;
+
+
 } BDB_READER;
 
 BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err);

@@ -105,12 +105,24 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
 
     reader->row_groups = malloc(reader->group_count * sizeof(uint32_t));
     reader->offsets = malloc(reader->group_count * reader->col_count * sizeof(uint64_t));
+    reader->stats = malloc(reader->group_count * reader->col_count * sizeof(BdbColumnStats));
 
     for (int i = 0; i < reader->group_count; i++) {
         if (fread(&reader->row_groups[i], sizeof(uint32_t), 1, reader->file) != 1
             || fread(&reader->offsets[(size_t)i * reader->col_count], sizeof(uint64_t),
                       reader->col_count, reader->file) != reader->col_count) {
             return bdb_error_set(err, BDB_ERR_FORMAT, "'%s': group %u is cut short", path, i);
+        }
+
+        for (uint16_t c = 0; c < reader->col_count; c++) {
+            BdbColumnStats *s = &reader->stats[(size_t)i * reader->col_count + c];
+            uint8_t has_minmax;
+            if (fread(&has_minmax, sizeof(has_minmax), 1, reader->file) != 1 ||
+                fread(&s->min, sizeof(s->min), 1, reader->file) != 1 ||
+                fread(&s->max, sizeof(s->max), 1, reader->file) != 1) {
+                return bdb_error_set(err, BDB_ERR_FORMAT, "'%s': stats of group %u are cut short", path, i);
+                }
+            s->has_minmax = has_minmax != 0;
         }
     }
 
@@ -123,6 +135,8 @@ BdbStatus bdb_reader_open(BDB_READER *reader, const char *path, BdbError *err) {
           return bdb_error_set(err, BDB_ERR_NOMEM, "out of memory for column '%s'", col->name);
         }
     }
+
+
 
     return BDB_OK;
 }
@@ -178,8 +192,10 @@ void bdb_reader_close(BDB_READER *reader) {
 
     free(reader->row_groups);
     free(reader->offsets);
+    free(reader->stats);
     reader->row_groups = NULL;
     reader->offsets = NULL;
+    reader->stats = NULL;
 
     if (reader->file != NULL) {
         fclose(reader->file);
