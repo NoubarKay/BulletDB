@@ -50,6 +50,14 @@ Things that are broken right now, most serious first.
 - [ ] `FILTER` parses its constant as a `double`, so integer constants above
       2⁵³ (about 9 × 10¹⁵) lose precision. Parse whole-number constants with
       `strtoll` for `INT` columns
+- [ ] The CSV reader accepts `nan` and `inf` as `DOUBLE` values (`strtod`
+      parses them), and the writer doesn't skip `NaN` when it computes a row
+      group's min and max. If a group's first non-NULL value is `NaN`, both
+      stats are `NaN` for that group, because every comparison with `NaN` is
+      false. Harmless until zone-map pruning uses the stats; then it can skip
+      a group that has matching rows. Fix by rejecting `nan`/`inf` at import
+      (which also keeps them out of `SUM` and `AVG`), or by skipping `NaN` in
+      `compute_stats`
 - [ ] `bdb_now` (Windows) computes `counter × 1,000,000,000` before dividing,
       which overflows `int64_t` once the machine has been up for about 15
       minutes, so operator timings can be garbage. Split it into seconds and

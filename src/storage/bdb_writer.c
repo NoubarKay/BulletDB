@@ -11,11 +11,11 @@
 
 static void compute_stats(BdbColumnStats* s, const COLUMN *col, uint64_t count) {
     s->has_minmax = false;
+    s->max.d = 0;
+    s->min.d = 0;
 
     for (uint64_t row = 0; row<count; row++) {
         if (!col->bitmap[row]) continue;
-        s->max.d = 0;
-        s->min.d = 0;
 
         switch (col->type) {
             case BDB_COL_DOUBLE:
