@@ -54,7 +54,10 @@ add_executable(BulletDB main.c
         src/logical/bdb_logical_plan.h
         src/logical/bdb_expr.h
         src/logical/bdb_expr.c
-        src/logical/bdb_logical_plan.c)
+        src/logical/bdb_logical_plan.c
+        src/planner/bdb_planner.h
+        src/planner/bdb_planner.c
+)
 target_link_libraries(BulletDB PRIVATE bulletdb)
 bdb_warnings(BulletDB)
 
