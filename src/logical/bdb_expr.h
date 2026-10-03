@@ -16,7 +16,7 @@ enum BdbExprKind {
     BDB_EXPR_LITERAL_DOUBLE,
     BDB_EXPR_LITERAL_STRING,
     BDB_EXPR_BINARY,
-    BDB_EXPR_AGGREGATE
+    BDB_EXPR_AGGREGATE,
 };
 
 enum BdbBinaryExprKind {
