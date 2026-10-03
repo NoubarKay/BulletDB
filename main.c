@@ -234,9 +234,89 @@ static void test_binary_expressions(void) {
            binary_failures, binary_failures == 1 ? "" : "s");
 }
 
+// Checks for aggregate expressions. They reuse expect_field and expect_error,
+// so their failures are added to the same counter; the summary at the end
+// counts only the ones from this function.
+static void test_aggregate_expressions(void) {
+    BdbField fields[] = {
+        { "name",       BDB_COL_STR },
+        { "salary",     BDB_COL_DOUBLE },
+        { "department", BDB_COL_STR },
+        { "age",        BDB_COL_INT },
+        { "active",     BDB_COL_BOOL },
+    };
+    BdbSchema employees = { fields, 5 };
+    int failures_before = binary_failures;
+
+    BdbExpr name   = bdb_expr_column("name");
+    BdbExpr salary = bdb_expr_column("salary");
+    BdbExpr age    = bdb_expr_column("age");
+    BdbExpr active = bdb_expr_column("active");
+    BdbExpr height = bdb_expr_column("height");             // not in the table
+    BdbExpr factor = bdb_expr_literal_double(1.1);
+    BdbExpr raised = bdb_expr_binary(BDB_BINARY_EXPR_MUL, &salary, &factor);
+
+    printf("== aggregate expression checks ==\n\n");
+
+    // SUM, MIN and MAX keep the input's type; AVG is always DOUBLE.
+    printf("-- types --\n");
+    BdbExpr sum_salary  = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_SUM,   &salary);
+    BdbExpr sum_age     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_SUM,   &age);
+    BdbExpr min_age     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_MIN,   &age);
+    BdbExpr max_salary  = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_MAX,   &salary);
+    BdbExpr avg_age     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG,   &age);
+    BdbExpr avg_salary  = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG,   &salary);
+    expect_field("SUM(salary)",        &sum_salary, &employees, "SUM", BDB_COL_DOUBLE);
+    expect_field("SUM(age)",           &sum_age,    &employees, "SUM", BDB_COL_INT);
+    expect_field("MIN(age)",           &min_age,    &employees, "MIN", BDB_COL_INT);
+    expect_field("MAX(salary)",        &max_salary, &employees, "MAX", BDB_COL_DOUBLE);
+    expect_field("AVG(age)    (INT in)", &avg_age,  &employees, "AVG", BDB_COL_DOUBLE);
+    expect_field("AVG(salary)",        &avg_salary, &employees, "AVG", BDB_COL_DOUBLE);
+
+    // COUNT is INT and accepts any type.
+    printf("\n-- COUNT --\n");
+    BdbExpr count_name   = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_COUNT, &name);
+    BdbExpr count_active = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_COUNT, &active);
+    BdbExpr count_salary = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_COUNT, &salary);
+    expect_field("COUNT(name)   (STR in)",    &count_name,   &employees, "COUNT", BDB_COL_INT);
+    expect_field("COUNT(active) (BOOL in)",   &count_active, &employees, "COUNT", BDB_COL_INT);
+    expect_field("COUNT(salary) (DOUBLE in)", &count_salary, &employees, "COUNT", BDB_COL_INT);
+
+    // The input can be any expression, not only a column.
+    printf("\n-- an expression as input --\n");
+    BdbExpr max_raised = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_MAX, &raised);
+    BdbExpr avg_raised = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG, &raised);
+    expect_field("MAX(salary * 1.1)", &max_raised, &employees, "MAX", BDB_COL_DOUBLE);
+    expect_field("AVG(salary * 1.1)", &avg_raised, &employees, "AVG", BDB_COL_DOUBLE);
+
+    // Non-numbers are rejected by everything except COUNT, and a missing
+    // column is reported by all of them.
+    printf("\n-- errors --\n");
+    BdbExpr sum_name     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_SUM,   &name);
+    BdbExpr min_name     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_MIN,   &name);
+    BdbExpr avg_active   = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG,   &active);
+    BdbExpr avg_name     = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG,   &name);
+    BdbExpr count_height = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_COUNT, &height);
+    BdbExpr avg_height   = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_AVG,   &height);
+    BdbExpr sum_height   = bdb_expr_aggregate(BDB_AGGREGATE_EXPR_SUM,   &height);
+    expect_error("SUM(name)     (STR)",          &sum_name,     &employees, NULL);
+    expect_error("MIN(name)     (STR)",          &min_name,     &employees, NULL);
+    expect_error("AVG(active)   (BOOL)",         &avg_active,   &employees, NULL);
+    expect_error("AVG(name)     (STR)",          &avg_name,     &employees, NULL);
+    expect_error("COUNT(height) (missing)",      &count_height, &employees, "height");
+    expect_error("AVG(height)   (missing)",      &avg_height,   &employees, "height");
+    expect_error("SUM(height)   (missing)",      &sum_height,   &employees, "height");
+
+    int failures = binary_failures - failures_before;
+    printf("\n%s: %d failure%s\n\n",
+           failures == 0 ? "all aggregate checks passed" : "aggregate checks FAILED",
+           failures, failures == 1 ? "" : "s");
+}
+
 int main(int argc, char *argv[]) {
     show_logical_expressions();
     test_binary_expressions();
+    test_aggregate_expressions();
 
     BdbError err = {0};
     CSV_READER csvReader = {0};
