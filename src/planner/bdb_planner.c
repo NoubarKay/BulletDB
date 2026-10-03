@@ -77,9 +77,6 @@ BdbStatus bdb_planner_create(const BdbLogicalPlan *plan, BdbOperator **out, BdbE
             *out = &scan->base;
             return BDB_OK;
         case BDB_PLAN_SELECTION: {
-            // BdbFilter can only run "column <comparison> number", so check the
-            // condition has that shape before reading its parts. Done before
-            // planning the child, so there's nothing to clean up on failure.
             const BdbExpr *condition = plan->selection.condition;
             if (condition->kind != BDB_EXPR_BINARY || condition->binary.op > BDB_BINARY_EXPR_GE) {
                 return bdb_error_set(err, BDB_ERR_INVALID,
@@ -120,8 +117,34 @@ BdbStatus bdb_planner_create(const BdbLogicalPlan *plan, BdbOperator **out, BdbE
             *out = &filter->base;
             return BDB_OK;
         }
-        case BDB_PLAN_AGGREGATE:
-            return bdb_error_set(err, BDB_ERR_INVALID, "the planner can't build an aggregate yet");
+        case BDB_PLAN_AGGREGATE: {
+            // BdbAggregate computes one aggregate of one column. Checked before
+            // planning the child, so there's nothing to clean up on failure.
+            if (plan->aggregate.count != 1) {
+                return bdb_error_set(err, BDB_ERR_INVALID, "the engine can only compute one aggregate at a time");
+            }
+            const BdbExpr *expr  = plan->aggregate.exprs[0];
+            const BdbExpr *input = expr->aggregate.expr;
+            if (input->kind != BDB_EXPR_COL) {
+                return bdb_error_set(err, BDB_ERR_INVALID, "the engine can only aggregate on a column");
+            }
+
+            BdbOperator *child = NULL;
+            BdbStatus status = bdb_planner_create(plan->child, &child, err);
+            if (status != BDB_OK) {
+                return status;
+            }
+
+            BdbAggregate *aggregate = malloc(sizeof *aggregate);
+            if (aggregate == NULL) {
+                bdb_planner_free(child);
+                return bdb_error_set(err, BDB_ERR_NOMEM, "not enough memory to create aggregate");
+            }
+
+            bdb_aggregate_init(aggregate, child, to_aggregate_op(expr->aggregate.op), input->col.name);
+            *out = &aggregate->base;
+            return BDB_OK;
+        }
     }
     return bdb_error_set(err, BDB_ERR_INVALID, "unknown plan kind %d", (int)plan->kind);
 }
